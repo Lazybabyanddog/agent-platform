@@ -20,10 +20,6 @@
 | 同步调用 | `POST /api/v1/agents/{id}/invoke`：解析环境指针 → 固定版本 → LangGraph 执行（受步骤数 / 超时 / Token 预算约束） |
 | 可观测 | `trace_id` 贯穿 Run / LLM 调用 / 工具调用，支持轨迹查询与成功率、P50/P95 指标聚合 |
 
-### 一期明确不做
-
-知识库 / RAG 自建（改为通过 MCP 工具接入知识中台，平台不建设文档解析、切分、Embedding 与索引）、异步任务 Worker 消费、可视化编排与 Multi-Agent、记忆中心、评估中心、SSO（自建账号 + API Key，经 `AuthPort` 隔离）。
-
 ## 目录结构
 
 ```
@@ -315,45 +311,3 @@ curl -X POST http://localhost:8010/api/v1/tools/{tool_id}/grant -H "Authorizatio
 ```
 
 把 `/api/v1/tools/{tool_id}/versions` 返回的版本 id 绑进 Agent 版本（`tool_version_ids`）并发布，即可在调用中触发该 MCP 工具；轨迹里会记录远端 `tool_name`、耗时与状态。
-
-## 测试
-
-- 单元测试：`backend/tests/unit/`（ID 生成、设置校验、运行时预算、RLS 钩子、密钥不泄漏等）
-- 集成测试：`backend/tests/integration/`（租户生命周期、授权、Agent 版本与发布、同步调用隔离、限流、Outbox、轨迹与指标等），每个用例使用独立租户并在结束后清理，需 Docker 依赖在线
-- 端到端验收：`backend/tests/e2e/`（完整主链、回滚、越权阻断、审计追溯、MCP 工具轨迹），同样走 HTTP API 与真实 PostgreSQL，模型/工具上游使用确定性替身，不依赖外部 LLM；MCP 用例在测试进程内起真实 server，走完整协议链路
-- 前端暂无自动化测试，依赖 `npm run typecheck` 与 OpenAPI 生成类型保障契约一致性
-
-```bash
-# backend/，依赖服务与迁移就绪后（见「快速开始」1~4 步）
-pytest tests/e2e      # 端到端验收，约 10 秒
-pytest                # 全量（单元 + 集成 + 端到端）
-```
-
-## 验收（一期闭环）
-
-按「快速开始」1~5 步启动后端后，`pytest tests/e2e` 覆盖以下四条验收线，可在干净机器上照抄执行：
-
-| 验收项 | 用例 | 判据 |
-| --- | --- | --- |
-| 完整主链 | `test_full_flow_publish_invoke_and_trace` | 注册模型/Prompt/工具 → 建 Agent → 生成版本 → 发布 PROD → 同步调用成功 → 轨迹可查（2 次 LLM + 1 次工具调用，同一 `trace_id`） |
-| 回滚语义 | `test_rollback_switches_new_calls_and_keeps_run_history` | 回滚后新调用使用旧版本；历史 Run 的 `release_id` / `version_id` 不被改写；发布记录数量不变 |
-| 越权阻断 | `test_cross_tenant_access_and_invalid_api_key_are_blocked`、`test_revoked_tool_grant_blocks_invocation` | 跨租户读/调用返回 404 且不建 Run；工具授权撤销后受理阶段返回 `RESOURCE_UNAVAILABLE`；失效 API Key 返回 401 |
-| 审计追溯 | `test_audit_trail_covers_publish_rollback_grant_and_api_key` | 按 Agent 可查发布/回滚/授权变更，按 API Key 可查创建与禁用 |
-
-控制台侧手动验收：五个入口走一遍「Agent 列表 → Prompt 管理 → 版本与快照（含 diff）→ 发布/回滚 → 调试台」，调试台一次成功调用与一次失败调用都应显示 `trace_id` 与失败原因。
-
-Prompt 管理的手动路径：新建（code/名称/描述）→ 详情页编辑三条消息（system/user/assistant）→ 声明两个变量（其中一个带默认值）→ 保存生成 v1 → 渲染预览 → 改模板保存 v2 → 对比 v1/v2；再用只读账号复查「新建 / 保存」入口不可见。
-
-## 相关文档
-
-- [docs/dev-setup.md](docs/dev-setup.md)：本地环境搭建步骤与常见问题
-- [docs/enterprise_agent_platform_12_modules_prd.html](docs/enterprise_agent_platform_12_modules_prd.html)：12 大功能模块需求基线
-- [openspec/changes/agent-platform-foundation/](openspec/changes/agent-platform-foundation/)：一期变更的 proposal、design（技术架构决策 D-1…）、tasks 与 8 份能力规格
-
-## 已知边界
-
-- `deploy/` 目前仅提供开发依赖编排，无生产 Dockerfile、反向代理与 CI 流水线
-- 端到端验收模型/工具上游使用确定性替身，真实供应商连通性仍由模型注册的 `/probe` 单独验证
-- 静态类型检查（mypy）尚未纳入质量门槛：langgraph 类型存根与部分动态 SQL 仍有报错，当前以 `ruff check` + `pytest` 为准
-- `openspec/specs/` 待本变更归档后生成
-- 许可证未声明
