@@ -1,0 +1,36 @@
+"""Outbox 搬运进程入口：``python -m agent_platform.workers.outbox``。"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from agent_platform.settings import get_settings
+from agent_platform.shared.db import dispose_engines
+from agent_platform.shared.logging import configure_logging
+from agent_platform.shared.messaging.publisher import OutboxPublisher, RabbitMQEventSink
+
+logger = logging.getLogger(__name__)
+
+
+async def main() -> None:
+    settings = get_settings()
+    configure_logging(settings)
+    if not settings.outbox_publisher_enabled:
+        logger.warning("outbox publisher disabled by config")
+        return
+
+    publisher = OutboxPublisher(
+        RabbitMQEventSink(settings.rabbitmq_url, exchange_name=settings.events_exchange),
+        batch_size=settings.outbox_batch_size,
+        poll_interval_s=settings.outbox_poll_interval_s,
+    )
+    logger.info("outbox publisher started", extra={"exchange": settings.events_exchange})
+    try:
+        await publisher.run_forever()
+    finally:
+        await dispose_engines()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
