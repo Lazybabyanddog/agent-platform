@@ -158,6 +158,8 @@ class ExecutionSessionRepository:
                 ExecutionSession.env == env,
                 ExecutionSession.kind == kind,
                 ExecutionSession.session_key == session_key,
+                # 墓碑不参与寻址：标识已释放，再次使用按新会话处理
+                ExecutionSession.deleted_at.is_(None),
             )
         )
 
@@ -170,7 +172,9 @@ class ExecutionSessionRepository:
     ) -> ExecutionSession | None:
         return await session.scalar(
             select(ExecutionSession).where(
-                ExecutionSession.tenant_id == tenant_id, ExecutionSession.id == session_id
+                ExecutionSession.tenant_id == tenant_id,
+                ExecutionSession.id == session_id,
+                ExecutionSession.deleted_at.is_(None),
             )
         )
 
@@ -291,10 +295,17 @@ class ExecutionSessionRepository:
             )
         await session.execute(statement)
 
-    async def delete(
-        self, session: AsyncSession, row: ExecutionSession
+    async def mark_deleted(
+        self, session: AsyncSession, row: ExecutionSession, *, now: datetime
     ) -> None:
-        await session.delete(row)
+        """落删除墓碑：会话立即从可见集合消失，内容交由清理进程回收。
+
+        不在这里物理删除：Run.execution_session_id 是 ON DELETE SET NULL，
+        删行会切断回收进程定位子数据的唯一线索。
+        """
+        row.deleted_at = now
+        row.status = SessionStatus.IDLE
+        row.busy_since = None
         await session.flush()
 
     async def list_for_agent(
@@ -316,6 +327,8 @@ class ExecutionSessionRepository:
         conditions: list[Any] = [
             ExecutionSession.tenant_id == tenant_id,
             ExecutionSession.agent_id == agent_id,
+            # 已删除的会话不进列表，与其待回收的内容无关
+            ExecutionSession.deleted_at.is_(None),
         ]
         if kind is not None:
             conditions.append(ExecutionSession.kind == kind)

@@ -28,6 +28,10 @@ from agent_platform.contexts.execution.application.session_history_service impor
     SessionHistoryService,
     session_expired,
 )
+from agent_platform.contexts.execution.application.session_service import (
+    can_delete_session,
+    session_service,
+)
 from agent_platform.contexts.execution.domain.enums import RunKind
 from agent_platform.contexts.execution.infrastructure.repositories import ExecutionSessionRepository
 from agent_platform.contexts.execution.infrastructure.tables import ExecutionSession
@@ -67,6 +71,7 @@ def _session_item(
         title=row.title,
         turn_count=row.turn_count,
         owned=row.created_by is None or row.created_by == actor.actor_id,
+        can_delete=can_delete_session(row, actor),
         expired=session_expired(row, now),
         preview_config_hash=compute_config_hash(snapshot) if snapshot else None,
     )
@@ -194,6 +199,23 @@ async def list_sessions(
         page=page,
         page_size=page_size,
     )
+
+
+@router.delete(
+    "/sessions/{session_id}",
+    status_code=204,
+    tags=["runs"],
+    description=(
+        "删除会话：同步返回后该会话立即从列表与历史读取中消失，会话标识随即释放；"
+        "会话上下文、运行记录与追踪记录由后台清理进程异步回收，不可恢复。"
+        "他人会话、无归属的非管理员调用与不存在会话统一 404；"
+        "会话正在受理一轮对话时返回 409 `SESSION_BUSY`。"
+    ),
+)
+async def delete_session(session_id: uuid.UUID, actor: CurrentActor) -> Response:
+    await authorization.require_permission(actor, Permission.RUN_DELETE)
+    await session_service.delete(actor=actor, session_id=session_id)
+    return Response(status_code=204)
 
 
 @router.get(

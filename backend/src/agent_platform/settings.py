@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     outbox_batch_size: int = 50
     outbox_publisher_enabled: bool = True
 
+    # 会话内容回收（删除的异步阶段）
+    session_purge_poll_interval_s: float = 5.0
+    session_purge_batch_size: int = 50
+
     # 认证与凭据
     jwt_secret: str = DEV_JWT_SECRET
     jwt_algorithm: str = "HS256"

@@ -16,6 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -36,8 +37,22 @@ class ExecutionSession(Base, IdMixin, TimestampMixin):
 
     __tablename__ = "execution_session"
     __table_args__ = (
-        UniqueConstraint(
-            "tenant_id", "agent_id", "env", "kind", "session_key", name="uq_execution_session_scope"
+        # 已删除（待回收）的会话不占用会话标识：墓碑行与其替代者可以共存，
+        # 会话标识一旦删除即可被重新使用。
+        Index(
+            "uq_execution_session_scope_active",
+            "tenant_id",
+            "agent_id",
+            "env",
+            "kind",
+            "session_key",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        Index(
+            "ix_execution_session_deleted_at",
+            "deleted_at",
+            postgresql_where=text("deleted_at IS NOT NULL"),
         ),
         Index(
             "ix_execution_session_tenant_agent_active", "tenant_id", "agent_id", "last_active_at"
@@ -99,6 +114,10 @@ class ExecutionSession(Base, IdMixin, TimestampMixin):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        comment="会话删除的墓碑时间；写入后立即不可见，由清理进程回收内容后删除行",
+    )
 
 
 class Run(Base, IdMixin):

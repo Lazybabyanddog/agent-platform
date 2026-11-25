@@ -103,6 +103,39 @@ async def test_permission_without_resource_grant_is_rejected(tenant_env: TenantE
             )
 
 
+async def test_member_role_gets_run_delete_without_duplicate_links(
+    tenant_env: TenantEnv,
+) -> None:
+    """会话删除权限点授予内置 member；重复播种不产生重复的角色权限链接。"""
+    from sqlalchemy import select
+
+    from agent_platform.contexts.platform.application.defaults import ensure_platform_defaults
+    from agent_platform.contexts.platform.infrastructure.tables import (
+        Permission as PermissionRow,
+    )
+    from agent_platform.contexts.platform.infrastructure.tables import Role, RolePermission
+
+    async with system_session_scope() as session:
+        await ensure_platform_defaults(session)
+        await ensure_platform_defaults(session)
+
+    async with system_session_scope() as session:
+        pairs = (
+            await session.execute(
+                select(Role.code, PermissionRow.code)
+                .join(RolePermission, RolePermission.role_id == Role.id)
+                .join(PermissionRow, PermissionRow.id == RolePermission.permission_id)
+                .where(Role.tenant_id.is_(None))
+            )
+        ).all()
+
+    member_codes = [code for role_code, code in pairs if role_code == "member"]
+    assert "run:delete" in member_codes
+    assert len(member_codes) == len(set(member_codes)), "重复播种产生了重复链接"
+    admin_codes = {code for role_code, code in pairs if role_code == "tenant_admin"}
+    assert "run:delete" in admin_codes
+
+
 async def test_admin_bypasses_resource_grant(tenant_env: TenantEnv) -> None:
     admin = ActorContext(
         tenant_id=tenant_env.tenant_id,

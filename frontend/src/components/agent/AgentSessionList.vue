@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Plus, Refresh } from '@element-plus/icons-vue'
+import { Delete, Plus, Refresh } from '@element-plus/icons-vue'
 
 import type { SessionItem } from '@/api/endpoints'
 
@@ -11,10 +11,13 @@ const props = defineProps<{
   loadingMore?: boolean
   error?: string | null
   selectedId?: string | null
+  /** 正在提交删除的会话标识；只锁行内按钮，不影响列表其他交互。 */
+  deletingId?: string | null
 }>()
 
 const emit = defineEmits<{
   (e: 'select', session: SessionItem): void
+  (e: 'delete', session: SessionItem): void
   (e: 'load-more'): void
   (e: 'retry'): void
   (e: 'new-session'): void
@@ -92,7 +95,19 @@ function sessionLabel(item: SessionItem): string {
           :title="new Date(item.last_active_at).toLocaleString()"
           @click="emit('select', item)"
         >
-          <div class="item-title">{{ sessionLabel(item) }}</div>
+          <div class="item-head">
+            <div class="item-title">{{ sessionLabel(item) }}</div>
+            <el-button
+              v-if="item.can_delete"
+              class="item-delete"
+              link
+              type="danger"
+              :icon="Delete"
+              :loading="deletingId === item.id"
+              title="删除会话（不可恢复）"
+              @click.stop="emit('delete', item)"
+            />
+          </div>
           <div class="item-meta">
             <span>{{ item.env }}</span>
             <span>{{ item.turn_count }} 轮</span>
@@ -187,7 +202,30 @@ function sessionLabel(item: SessionItem): string {
   opacity: 0.72;
 }
 
+.item-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+/* 悬停或聚焦时才显形，避免列表被一排删除按钮干扰；行本身已有 title 提示 */
+.item-delete {
+  flex: none;
+  height: 18px;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.session-item:hover .item-delete,
+.session-item.is-active .item-delete,
+.item-delete:focus-visible {
+  opacity: 1;
+}
+
 .item-title {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   line-height: 1.45;
   color: #1f2937;

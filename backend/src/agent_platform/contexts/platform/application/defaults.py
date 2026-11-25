@@ -35,6 +35,7 @@ PERMISSION_DEFS = {
     "audit:read": ("审计查看", "audit", "read"),
     "grant:manage": ("资源授权管理", "grant", "manage"),
     "run:read": ("运行记录查看", "run", "read"),
+    "run:delete": ("会话删除", "run", "delete"),
     "insight:read_content": ("轨迹内容查看", "insight", "read_content"),
 }
 

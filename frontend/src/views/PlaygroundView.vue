@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { ApiError, describeError } from '@/api/client'
 import {
   ENVIRONMENTS,
+  deleteSession,
   getSessionHistory,
   listAgentVersions,
   listAgents,
@@ -68,6 +70,8 @@ const sessionsLoadingMore = ref(false)
 const sessionsError = ref<string | null>(null)
 
 const activeSession = ref<SessionItem | null>(null)
+/** 正在提交删除的会话标识，用于锁行内按钮并防止重复提交。 */
+const deletingSessionId = ref<string | null>(null)
 const historyTurns = ref<SessionHistoryTurn[]>([])
 const historyLoading = ref(false)
 const historyError = ref<string | null>(null)
@@ -324,6 +328,43 @@ function startNewSession(): void {
   clearSessionState()
 }
 
+/**
+ * 删除会话：同步移除列表行，会话内容交由后台进程回收。
+ * 删除的是当前会话时复用清空逻辑，一并断开对话区与地址栏标识，
+ * 避免后续预览继续向已释放的会话发送消息。
+ */
+async function removeSession(item: SessionItem): Promise<void> {
+  if (deletingSessionId.value) return
+  const label = item.title || `${item.env} · ${item.turn_count} 轮`
+  try {
+    await ElMessageBox.confirm(
+      `删除后「${label}」会立即从列表消失，会话上下文、运行记录与追踪记录将被后台清理，不可恢复。确定删除吗？`,
+      '删除会话',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  deletingSessionId.value = item.id
+  try {
+    await deleteSession(item.id)
+    const index = sessions.value.findIndex((row) => row.id === item.id)
+    if (index !== -1) sessions.value.splice(index, 1)
+    if (sessionTotal.value > 0) sessionTotal.value -= 1
+    if (activeSession.value?.id === item.id) clearSessionState()
+    ElMessage.success('已删除会话，会话内容将在后台清理')
+  } catch (err) {
+    // 失败保留列表行：会话仍然存在，直接移除会让人误以为删除成功
+    if (err instanceof ApiError && err.code === 'SESSION_BUSY') {
+      ElMessage.warning('该会话正在执行一轮对话，请等本轮结束后再删除')
+    } else {
+      ElMessage.error(describeError(err))
+    }
+  } finally {
+    deletingSessionId.value = null
+  }
+}
+
 function retryHistory(): void {
   const item = activeSession.value
   if (item) {
@@ -520,8 +561,10 @@ onMounted(async () => {
           :loading-more="sessionsLoadingMore"
           :error="sessionsError"
           :selected-id="activeSession?.id ?? null"
+          :deleting-id="deletingSessionId"
           class="panel"
           @select="selectSession"
+          @delete="removeSession"
           @load-more="loadMoreSessions"
           @retry="loadSessions(true)"
           @new-session="startNewSession"

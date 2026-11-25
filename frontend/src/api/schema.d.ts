@@ -1003,6 +1003,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Session
+         * @description 删除会话：同步返回后该会话立即从列表与历史读取中消失，会话标识随即释放；会话上下文、运行记录与追踪记录由后台清理进程异步回收，不可恢复。他人会话、无归属的非管理员调用与不存在会话统一 404；会话正在受理一轮对话时返回 409 `SESSION_BUSY`。
+         */
+        delete: operations["delete_session_api_v1_sessions__session_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{session_id}/history": {
         parameters: {
             query?: never;
@@ -2625,6 +2645,12 @@ export interface components {
              * @default true
              */
             owned: boolean;
+            /**
+             * Can Delete
+             * @description 当前调用者能否删除该会话；无归属的存量会话仅租户管理员可删，不能与 owned 混用
+             * @default false
+             */
+            can_delete: boolean;
             /**
              * Expired
              * @description 是否已过期；过期会话历史只读
@@ -5334,6 +5360,35 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SessionPageResponse"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_session_api_v1_sessions__session_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

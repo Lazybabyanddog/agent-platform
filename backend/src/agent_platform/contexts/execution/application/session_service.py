@@ -22,10 +22,13 @@ from agent_platform.contexts.agent.infrastructure.repositories import (
     PointerRepository,
 )
 from agent_platform.contexts.agent.infrastructure.tables import Agent
-from agent_platform.contexts.execution.domain.enums import RunKind
+from agent_platform.contexts.execution.domain.enums import RunKind, SessionStatus
 from agent_platform.contexts.execution.infrastructure.repositories import (
     ExecutionSessionRepository,
 )
+from agent_platform.contexts.execution.infrastructure.tables import ExecutionSession
+from agent_platform.contexts.platform.application.audit_service import audit_service
+from agent_platform.contexts.platform.domain.permissions import Permission
 from agent_platform.shared.context import ActorContext
 from agent_platform.shared.db import session_scope
 from agent_platform.shared.errors import (
@@ -107,6 +110,18 @@ def session_title(values: dict[str, Any]) -> str | None:
     return text[:TITLE_MAX_LENGTH] or None
 
 
+def can_delete_session(row: ExecutionSession, actor: ActorContext) -> bool:
+    """会话删除归属：创建者本人；无归属的存量会话仅管理员。
+
+    列表项的 `owned` 对无归属会话恒为真，不能直接拿来做删除判断。
+    """
+    if not actor.has_permission(Permission.RUN_DELETE):
+        return False
+    if row.created_by is None:
+        return actor.is_admin
+    return row.created_by == actor.actor_id
+
+
 class SessionService:
     """会话寻址与占用管理。"""
 
@@ -145,8 +160,9 @@ class SessionService:
                 session_key=key,
             )
             if existing is not None and existing.expires_at <= now:
-                # 过期即视为新会话：换新行、换 thread，旧上下文不再参与
-                await repo.delete(session, existing)
+                # 过期即视为新会话：旧行落墓碑、换新行换 thread，
+                # 旧上下文与追踪记录交给清理进程回收（标识即刻释放）
+                await repo.mark_deleted(session, existing, now=now)
                 existing = None
 
             if existing is not None:
@@ -239,7 +255,8 @@ class SessionService:
                 session_key=key,
             )
             if existing is not None and existing.expires_at <= now:
-                await repo.delete(session, existing)
+                # 同上：墓碑而非物理删除，避免把旧会话的 checkpoint 留成孤儿
+                await repo.mark_deleted(session, existing, now=now)
                 existing = None
 
             if existing is not None:
@@ -332,6 +349,52 @@ class SessionService:
                 session_id=binding.session_id,
                 title=title,
                 now=datetime.now(UTC),
+            )
+
+    async def delete(self, *, actor: ActorContext, session_id: uuid.UUID) -> None:
+        """删除会话：同步落墓碑并留审计，内容由清理进程异步回收。
+
+        存在性、他人会话与无权删除统一按不存在处理，避免用响应区分资源归属。
+        """
+        async with session_scope(actor.tenant_id) as session:
+            row = await self._repository.by_id(
+                session, tenant_id=actor.tenant_id, session_id=session_id
+            )
+            if row is None or not can_delete_session(row, actor):
+                raise NotFoundError("session not found")
+
+            now = datetime.now(UTC)
+            if (
+                row.status == SessionStatus.BUSY
+                and row.busy_since is not None
+                and row.busy_since >= now - timedelta(seconds=STALE_BUSY_SECONDS)
+            ):
+                raise ConflictError(
+                    "session is processing another turn",
+                    code="SESSION_BUSY",
+                    details=[
+                        {
+                            "field": "session_id",
+                            "reason": "another turn is in progress; retry after it completes",
+                        }
+                    ],
+                )
+
+            await self._repository.mark_deleted(session, row, now=now)
+            await audit_service.record(
+                session,
+                tenant_id=actor.tenant_id,
+                action="session.deleted",
+                resource_type="session",
+                resource_id=row.id,
+                actor=actor,
+                detail={
+                    "agent_id": str(row.agent_id),
+                    "env": row.env.value,
+                    "kind": row.kind.value,
+                    "session_key": row.session_key,
+                    "turn_count": row.turn_count,
+                },
             )
 
     def _validate_key(self, session_key: str) -> str:

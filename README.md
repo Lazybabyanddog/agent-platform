@@ -146,6 +146,26 @@ curl -X POST http://localhost:8010/api/v1/auth/login \
 
 登录返回的 `access_token` 用于后续请求：`Authorization: Bearer <token>`。
 
+### 会话内容回收进程
+
+删除调试台会话分两阶段：`DELETE /api/v1/sessions/{id}` 只写墓碑，会话立即从列表与历史消失；正文（checkpoint）、运行与追踪记录由常驻进程回收，另开一个终端：
+
+```bash
+# backend/
+python -m agent_platform.workers.session_purge           # 常驻，默认每 5s 扫一批墓碑
+python -m agent_platform.workers.session_purge --once    # 排障：处理完当前墓碑即退出
+```
+
+该进程必须与 API **同批发布**：API 负责写墓碑，worker 负责清内容；只发 API 不启 worker 时墓碑会持续堆积，磁盘与追踪记录不会被释放。
+
+回滚到不带墓碑语义的版本前，先停 worker，并确认无墓碑残留：
+
+```sql
+select count(*) from execution.execution_session where deleted_at is not null;  -- 应为 0
+```
+
+否则迁移 `0014_session_delete` 的 `downgrade` 会因同一 `session_key` 存在多行而无法重建全量唯一约束。
+
 ### 6. 启动前端
 
 ```bash
@@ -176,6 +196,7 @@ npm run typecheck
 | 应用 | `APP_NAME`、`ENVIRONMENT`、`DEBUG`、`API_PREFIX` |
 | 数据库 | `DATABASE_URL`、`MIGRATION_DATABASE_URL`、`DB_POOL_SIZE`、`DB_MAX_OVERFLOW`、`DB_ECHO` |
 | 缓存/消息 | `REDIS_URL`、`RABBITMQ_URL`、`EVENTS_EXCHANGE`、`OUTBOX_POLL_INTERVAL_S`、`OUTBOX_BATCH_SIZE`、`OUTBOX_PUBLISHER_ENABLED` |
+| 会话回收 | `SESSION_PURGE_POLL_INTERVAL_S`、`SESSION_PURGE_BATCH_SIZE` |
 | 安全 | `JWT_SECRET`、`JWT_ALGORITHM`、`JWT_TTL_SECONDS`、`SECRET_ENC_KEY`、`API_KEY_PREFIX` |
 | 执行预算 | `SYNC_MAX_TIMEOUT_S`、`DEFAULT_MAX_STEPS`、`DEFAULT_TIMEOUT_S`、`DEFAULT_TOKEN_BUDGET` |
 | 模型调用 | `MODEL_PROBE_TIMEOUT_S`、`DEFAULT_MODEL_RPM_LIMIT`、`DEFAULT_MODEL_CONCURRENCY_LIMIT` |
@@ -192,6 +213,7 @@ pytest tests/e2e                         # 端到端验收
 ruff check src tests                     # 静态检查（当前质量门槛）
 alembic revision --autogenerate -m "msg"
 python -m agent_platform.workers.outbox  # 启动 Outbox 事件发布进程
+python -m agent_platform.workers.session_purge  # 启动会话删除内容回收进程
 python scripts/check_deps.py             # 依赖连通性自检
 
 # 前端（frontend/）

@@ -113,9 +113,14 @@ python scripts/check_deps.py
 
 # backend/ —— Outbox 搬运进程，把发布事件投递到 RabbitMQ（另开一个终端）
 python -m agent_platform.workers.outbox
+
+# backend/ —— 会话删除的内容回收进程，清理墓碑会话的 checkpoint、运行与追踪记录
+python -m agent_platform.workers.session_purge
 ```
 
 不启动 Outbox 进程时，发布事件会滞留在 outbox 表里，不影响同步调用链路。
+
+不启动会话回收进程时，删除接口仍会立即生效（会话从列表与历史消失），但会话正文与追踪记录会停留在库里，`deleted_at is not null` 的行会一直累积。该进程必须与 API 同批发布；回滚前先停进程并确认 `select count(*) from execution.execution_session where deleted_at is not null` 为 0，否则 `0014_session_delete` 的 downgrade 无法重建全量唯一约束。
 
 ### 日志位置与格式
 

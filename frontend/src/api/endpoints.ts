@@ -237,6 +237,14 @@ export function getSessionHistory(
   })
 }
 
+/**
+ * 删除会话：返回即从列表与历史中消失，会话标识随即释放；
+ * 会话内容由后台进程异步回收，不可恢复。执行中的会话返回 409 `SESSION_BUSY`。
+ */
+export function deleteSession(sessionId: string): Promise<void> {
+  return api.delete<void>(`/sessions/${sessionId}`)
+}
+
 export interface RunListQuery {
   agent_id?: string | null
   kind?: RunKind | null

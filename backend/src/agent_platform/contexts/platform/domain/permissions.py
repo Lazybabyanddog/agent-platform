@@ -29,6 +29,7 @@ class Permission(StrEnum):
     GRANT_MANAGE = "grant:manage"
 
     RUN_READ = "run:read"
+    RUN_DELETE = "run:delete"
     INSIGHT_READ_CONTENT = "insight:read_content"
 
 
@@ -46,5 +47,6 @@ BUILTIN_ROLE_PERMISSIONS: dict[str, list[str]] = {
         Permission.PROMPT_READ.value,
         Permission.TOOL_READ.value,
         Permission.RUN_READ.value,
+        Permission.RUN_DELETE.value,
     ],
 }

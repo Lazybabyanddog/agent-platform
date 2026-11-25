@@ -274,8 +274,9 @@ async def test_expired_session_starts_a_new_thread(
 
     runs = await _run_session_ids(tenant_env.tenant_id)
     assert len(runs) == 2
-    # 最新一轮挂到新会话行上（旧行已删除，历史运行保留调用方 session_id）
+    # 最新一轮挂到新会话行上（旧行落墓碑，历史运行仍指向它直到被回收）
     assert runs[0] is not None
+    assert runs[0] != runs[1], "过期复用时必须换到新的会话行"
 
     # 过期后换新行、换 thread，旧上下文不再参与
     async with session_scope(tenant_env.tenant_id) as session:
@@ -289,8 +290,11 @@ async def test_expired_session_starts_a_new_thread(
         )
     assert threads and threads[0].startswith("sess-")
     rows = await _session_rows(tenant_env.tenant_id)
-    assert len(rows) == 1
-    assert rows[0].expires_at > datetime.now(UTC)
+    live = [row for row in rows if row.deleted_at is None]
+    assert len(live) == 1
+    assert live[0].expires_at > datetime.now(UTC)
+    # 过期旧行落墓碑等待清理进程回收，不再是有效会话
+    assert [row.deleted_at for row in rows if row.deleted_at is not None] != []
 
 
 async def test_long_history_is_trimmed_and_recorded(
