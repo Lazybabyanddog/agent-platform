@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError, describeError } from '@/api/client'
 import {
   createPromptVersion,
+  deletePrompt,
   getPrompt,
   listPromptVersions,
   type Prompt,
@@ -46,6 +47,7 @@ const note = ref('')
 
 const loading = ref(false)
 const saving = ref(false)
+const deleting = ref(false)
 const error = ref<string | null>(null)
 const pageError = ref<{ title: string; message: string } | null>(null)
 const saveError = ref<string | null>(null)
@@ -241,6 +243,45 @@ async function save(): Promise<void> {
   }
 }
 
+async function remove(): Promise<void> {
+  const current = prompt.value
+  if (!current) return
+  try {
+    await ElMessageBox.confirm(
+      `删除后「${current.code}」的全部版本会一并清除且不可恢复，确定删除？`,
+      '删除 Prompt',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  deleting.value = true
+  try {
+    await deletePrompt(current.id)
+    ElMessage.success(`已删除 Prompt ${current.code}`)
+    await router.push('/prompts')
+  } catch (err) {
+    if (err instanceof ApiError && err.code === 'PROMPT_IN_USE') {
+      ElMessage.warning('该 Prompt 仍被 Agent 版本引用，请先在对应 Agent 中解除引用后再删除')
+      return
+    }
+    ElMessage.error(describeError(err))
+  } finally {
+    deleting.value = false
+  }
+}
+
+// 地址栏是版本选择的落点：外部改动（前进/后退、手工改 URL）要应用回页面。
+// 自己写入的 query 与外链一致时直接跳过，避免 resetDraft 冲掉草稿。
+watch(
+  () => route.query.version,
+  () => {
+    if (!versions.value.length) return
+    if (requestedVersionNo() === selectedVersionNo.value) return
+    applyRequestedVersion()
+  },
+)
+
 onMounted(load)
 </script>
 
@@ -286,6 +327,15 @@ onMounted(load)
           @click="save"
         >
           保存为新版本
+        </el-button>
+        <el-button
+          v-if="canManage && prompt"
+          type="danger"
+          plain
+          :loading="deleting"
+          @click="remove"
+        >
+          删除
         </el-button>
       </div>
     </div>

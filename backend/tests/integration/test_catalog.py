@@ -303,6 +303,116 @@ async def test_prompt_duplicate_code_is_conflict(
     assert second.status_code == 409
 
 
+async def test_prompt_delete_cascades_versions_and_frees_code(
+    api_client, tenant_env: TenantEnv, admin_headers: dict[str, str]
+) -> None:
+    from sqlalchemy import func, select
+
+    from agent_platform.contexts.catalog.infrastructure.tables import PromptVersion
+    from agent_platform.shared.db import session_scope
+
+    code = f"del-{uuid.uuid4().hex[:6]}"
+    created = await api_client.post(
+        "/api/v1/prompts",
+        headers=admin_headers,
+        json={
+            "code": code,
+            "name": "Deletable",
+            "messages": [{"role": "system", "content": "bye"}],
+        },
+    )
+    assert created.status_code == 201, created.text
+    prompt_id = uuid.UUID(created.json()["id"])
+
+    deleted = await api_client.delete(f"/api/v1/prompts/{prompt_id}", headers=admin_headers)
+    assert deleted.status_code == 204, deleted.text
+
+    gone = await api_client.get(f"/api/v1/prompts/{prompt_id}", headers=admin_headers)
+    assert gone.status_code == 404
+    again = await api_client.delete(f"/api/v1/prompts/{prompt_id}", headers=admin_headers)
+    assert again.status_code == 404
+
+    async with session_scope(tenant_env.tenant_id) as session:
+        remaining = await session.scalar(
+            select(func.count()).select_from(PromptVersion).where(PromptVersion.prompt_id == prompt_id)
+        )
+    assert remaining == 0
+
+    # 编码随删除释放，可以重新创建
+    recreated = await api_client.post(
+        "/api/v1/prompts", headers=admin_headers, json={"code": code, "name": "Again"}
+    )
+    assert recreated.status_code == 201, recreated.text
+
+
+async def test_prompt_delete_blocked_while_referenced_by_agent_version(
+    api_client, tenant_env: TenantEnv, admin_headers: dict[str, str]
+) -> None:
+    from agent_platform.contexts.agent.domain.enums import (
+        AgentStatus,
+        AgentType,
+        BindingResourceType,
+        BindingRole,
+    )
+    from agent_platform.contexts.agent.infrastructure.tables import (
+        Agent,
+        AgentVersion,
+        AgentVersionBinding,
+    )
+    from agent_platform.shared.db import session_scope
+
+    created = await api_client.post(
+        "/api/v1/prompts",
+        headers=admin_headers,
+        json={
+            "code": f"used-{uuid.uuid4().hex[:6]}",
+            "name": "Used",
+            "messages": [{"role": "system", "content": "hi"}],
+        },
+    )
+    assert created.status_code == 201, created.text
+    prompt_id = uuid.UUID(created.json()["id"])
+
+    async with session_scope(tenant_env.tenant_id) as session:
+        agent = Agent(
+            tenant_id=tenant_env.tenant_id,
+            code=f"a-{uuid.uuid4().hex[:6]}",
+            name="Referrer",
+            type=AgentType.CHAT,
+            tags=[],
+            status=AgentStatus.DRAFT,
+        )
+        session.add(agent)
+        await session.flush()
+        version = AgentVersion(
+            tenant_id=tenant_env.tenant_id,
+            agent_id=agent.id,
+            version_no=1,
+            snapshot={},
+            config_hash="0" * 64,
+        )
+        session.add(version)
+        await session.flush()
+        session.add(
+            AgentVersionBinding(
+                tenant_id=tenant_env.tenant_id,
+                agent_version_id=version.id,
+                role=BindingRole.PROMPT,
+                resource_type=BindingResourceType.PROMPT_VERSION,
+                resource_id=prompt_id,
+                overrides={},
+            )
+        )
+
+    blocked = await api_client.delete(f"/api/v1/prompts/{prompt_id}", headers=admin_headers)
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["error"]["code"] == "PROMPT_IN_USE"
+    assert blocked.json()["error"]["details"][0]["agent_version_count"] == 1
+
+    still_there = await api_client.get(f"/api/v1/prompts/{prompt_id}", headers=admin_headers)
+    assert still_there.status_code == 200
+
+
 # ------------------------------------------------------------------ 工具契约聚合
 
 
@@ -351,7 +461,7 @@ async def test_latest_for_tools_returns_highest_version_per_tool(tenant_env: Ten
         actor=actor,
         code=f"multi-{uuid.uuid4().hex[:6]}",
         name="Multi",
-        description=None,
+        description="multi tool",
         spec=_tool_spec(),
         risk_level=RiskLevel.READ_ONLY,
     )
@@ -362,7 +472,7 @@ async def test_latest_for_tools_returns_highest_version_per_tool(tenant_env: Ten
         actor=actor,
         code=f"single-{uuid.uuid4().hex[:6]}",
         name="Single",
-        description=None,
+        description="single tool",
         spec=_tool_spec(),
         risk_level=RiskLevel.READ_ONLY,
     )
@@ -535,3 +645,133 @@ async def test_tool_grant_state_endpoint_covers_three_cases(
 
     missing = await api_client.get(f"/api/v1/tools/{uuid.uuid4()}/grant", headers=admin_headers)
     assert missing.status_code == 404
+
+# ------------------------------------------------------------------ 模型可见契约
+
+
+def _contract_spec() -> dict:
+    return {
+        "method": "POST",
+        "url": "https://tools.local/weather",
+        "timeout_s": 5,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "start_date": {"type": "string"},
+            },
+            "required": ["city", "start_date"],
+        },
+        "model_schema": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string", "description": "中文城市名"},
+                "start_date": {"type": "string", "format": "date"},
+            },
+            "required": ["city", "start_date"],
+        },
+        "returns": {"terminal_statuses": ["no_data"]},
+    }
+
+
+async def test_tool_version_reports_contract_warnings_without_blocking(
+    api_client, admin_headers: dict[str, str]
+) -> None:
+    spec = _contract_spec()
+    del spec["model_schema"]["properties"]["start_date"]["format"]
+    tool = await _create_tool(api_client, admin_headers, spec=spec)
+
+    version = await api_client.post(
+        f"/api/v1/tools/{tool['id']}/versions",
+        headers=admin_headers,
+        json={"spec": spec},
+    )
+    assert version.status_code == 201, version.text
+    body = version.json()
+    assert body["spec"]["description"] == "echo service"
+    assert body["spec"]["model_schema"] == spec["model_schema"]
+    assert body["spec"]["returns"] == {"terminal_statuses": ["no_data"]}
+    assert [item["field"] for item in body["warnings"]] == [
+        "spec.input_schema.properties.start_date"
+    ]
+
+    listed = await api_client.get(
+        f"/api/v1/tools/{tool['id']}/versions", headers=admin_headers
+    )
+    assert listed.status_code == 200
+    assert listed.json()[0]["spec"]["model_schema"] == spec["model_schema"]
+
+
+async def test_version_without_any_description_is_rejected(
+    api_client, admin_headers: dict[str, str]
+) -> None:
+    created = await api_client.post(
+        "/api/v1/tools",
+        headers=admin_headers,
+        json={
+            "code": f"nodesc-{uuid.uuid4().hex[:6]}",
+            "name": "NoDesc",
+            "spec": _tool_spec(),
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    rejected = await api_client.post(
+        f"/api/v1/tools/{created.json()['id']}/versions",
+        headers=admin_headers,
+        json={"spec": _tool_spec()},
+    )
+    assert rejected.status_code == 422, rejected.text
+    assert rejected.json()["error"]["details"][0]["field"] == "spec.description"
+
+
+async def test_agent_snapshot_carries_model_contract(
+    api_client, admin_headers: dict[str, str]
+) -> None:
+    spec = _contract_spec()
+    tool = await _create_tool(api_client, admin_headers, spec=spec)
+    assert (
+        await api_client.post(f"/api/v1/tools/{tool['id']}/grant", headers=admin_headers)
+    ).status_code == 204
+    versions = await api_client.get(
+        f"/api/v1/tools/{tool['id']}/versions", headers=admin_headers
+    )
+    tool_version_id = versions.json()[0]["id"]
+
+    model = await _create_model(api_client, admin_headers, f"contract-{uuid.uuid4().hex[:6]}")
+    prompt = await api_client.post(
+        "/api/v1/prompts",
+        headers=admin_headers,
+        json={
+            "code": f"contract-{uuid.uuid4().hex[:6]}",
+            "name": "Contract",
+            "messages": [{"role": "system", "content": "hi"}],
+        },
+    )
+    assert prompt.status_code == 201, prompt.text
+    prompt_version = (
+        await api_client.get(
+            f"/api/v1/prompts/{prompt.json()['id']}/versions", headers=admin_headers
+        )
+    ).json()[0]
+    agent = await api_client.post(
+        "/api/v1/agents",
+        headers=admin_headers,
+        json={"code": f"contract-{uuid.uuid4().hex[:6]}", "name": "Contract"},
+    )
+    assert agent.status_code == 201, agent.text
+
+    version = await api_client.post(
+        f"/api/v1/agents/{agent.json()['id']}/versions",
+        headers=admin_headers,
+        json={
+            "model_id": model["id"],
+            "prompt_version_id": prompt_version["id"],
+            "tool_version_ids": [tool_version_id],
+        },
+    )
+    assert version.status_code == 201, version.text
+    snapshot_spec = version.json()["snapshot"]["tools"][0]["spec"]
+    assert snapshot_spec["description"] == "echo service"
+    assert snapshot_spec["model_schema"]["properties"]["start_date"]["format"] == "date"
+    assert snapshot_spec["returns"] == {"terminal_statuses": ["no_data"]}

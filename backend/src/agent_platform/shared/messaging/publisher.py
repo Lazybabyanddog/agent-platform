@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from typing import Protocol
 
 import aio_pika
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.shared.db import system_session_scope
+from agent_platform.shared.logging import get_logger
 from agent_platform.shared.messaging.envelope import EXCHANGE_NAME
 from agent_platform.shared.messaging.outbox import (
     claim_due_batch,
@@ -22,7 +22,7 @@ from agent_platform.shared.messaging.outbox import (
     mark_sent,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class EventSink(Protocol):
@@ -101,7 +101,7 @@ class OutboxPublisher:
                     message_id=str(event.id),
                 )
             except Exception as exc:  # noqa: BLE001 - 任何投递异常都要落库重试
-                logger.warning("outbox publish failed", extra={"event_id": str(event.id)})
+                logger.warning("outbox.publish_failed", event_id=str(event.id))
                 await mark_attempt_failed(
                     session,
                     event,
@@ -120,7 +120,7 @@ class OutboxPublisher:
                 try:
                     published = await self.publish_once()
                 except Exception:  # noqa: BLE001 - 进程不能因为一次数据库抖动退出
-                    logger.exception("outbox loop iteration failed")
+                    logger.exception("outbox.loop_failed")
                     published = 0
                 if published == 0:
                     try:

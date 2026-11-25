@@ -8,7 +8,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEV_JWT_SECRET = "dev-only-insecure-jwt-secret-change-me"
@@ -66,7 +66,19 @@ class Settings(BaseSettings):
     # 可观测
     log_level: str = "INFO"
     log_json: bool = True
+    # 空表示只写 stdout（容器默认）；设置目录后额外落 <dir>/<service>.log
+    log_dir: str | None = None
+    log_max_bytes: int = 10 * 1024 * 1024
+    log_backup_count: int = 5
     retain_prompt_content: bool = False
+
+    @field_validator("log_dir", mode="before")
+    @classmethod
+    def _blank_log_dir_is_none(cls, value: object) -> object:
+        """``LOG_DIR=`` 的空值等同于不配置，避免把当前目录当成日志目录。"""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @model_validator(mode="after")
     def _check_production_secrets(self) -> Settings:

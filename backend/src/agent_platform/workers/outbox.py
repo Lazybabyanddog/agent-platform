@@ -3,21 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 
 from agent_platform.settings import get_settings
 from agent_platform.shared.db import dispose_engines
-from agent_platform.shared.logging import configure_logging
+from agent_platform.shared.logging import configure_logging, get_logger
 from agent_platform.shared.messaging.publisher import OutboxPublisher, RabbitMQEventSink
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def main() -> None:
     settings = get_settings()
-    configure_logging(settings)
+    configure_logging(settings, service="outbox")
     if not settings.outbox_publisher_enabled:
-        logger.warning("outbox publisher disabled by config")
+        logger.warning("outbox.publish_disabled")
         return
 
     publisher = OutboxPublisher(
@@ -25,7 +24,7 @@ async def main() -> None:
         batch_size=settings.outbox_batch_size,
         poll_interval_s=settings.outbox_poll_interval_s,
     )
-    logger.info("outbox publisher started", extra={"exchange": settings.events_exchange})
+    logger.info("outbox.started", exchange=settings.events_exchange)
     try:
         await publisher.run_forever()
     finally:

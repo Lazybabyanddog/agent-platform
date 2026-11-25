@@ -47,6 +47,7 @@ class PreviewService:
         params: dict[str, Any],
         policy: dict[str, Any],
         values: dict[str, Any],
+        runtime_context: list[str] | None = None,
         preview_session_id: str | None = None,
         timeout_s: float | None = None,
     ) -> PreviewResult:
@@ -66,6 +67,7 @@ class PreviewService:
                 tool_version_ids=tool_version_ids,
                 params=params,
                 policy=policy,
+                runtime_context=runtime_context,
             )
             # 装配阶段已完成引用复检与入参/策略校验；不可用时直接 409，不产生 run。
             if not assembled.available:
@@ -119,6 +121,10 @@ class PreviewService:
         finally:
             if binding is not None:
                 await session_service.release(actor=actor, binding=binding)
+
+        # 运行已产生即计一轮；标题只在首轮写入（正文留存关闭时不落）
+        if binding is not None:
+            await session_service.record_turn(actor=actor, binding=binding, values=values)
 
         return PreviewResult(
             run_id=result.run_id,

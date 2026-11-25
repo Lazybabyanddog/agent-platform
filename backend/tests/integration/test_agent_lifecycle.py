@@ -1,4 +1,4 @@
-"""Agent 生命周期：发布激活、启停门禁、归档终态、删除约束与审计。"""
+"""Agent 生命周期：发布激活、启停门禁、归档终态、软删除与审计。"""
 
 from __future__ import annotations
 
@@ -265,6 +265,13 @@ async def test_delete_empty_agent_frees_code(
     gone = await api_client.get(f"/api/v1/agents/{agent_id}", headers=admin_headers)
     assert gone.status_code == 404
 
+    listed = await api_client.get("/api/v1/agents", headers=admin_headers)
+    assert listed.status_code == 200, listed.text
+    assert all(item["id"] != agent_id for item in listed.json()["items"])
+
+    again = await api_client.delete(f"/api/v1/agents/{agent_id}", headers=admin_headers)
+    assert again.status_code == 404
+
     recreated = await api_client.post(
         "/api/v1/agents",
         headers=admin_headers,
@@ -273,26 +280,64 @@ async def test_delete_empty_agent_frees_code(
     assert recreated.status_code == 201, recreated.text
 
 
-async def test_delete_agent_with_history_is_rejected(
+async def test_delete_agent_with_history_hides_it_but_keeps_rows(
     api_client, tenant_env: TenantEnv, admin_headers: dict[str, str]
 ) -> None:
     agent, _, _ = await _published_agent(api_client, admin_headers)
+    code = agent["code"]
 
-    response = await api_client.delete(
-        f"/api/v1/agents/{agent['id']}", headers=admin_headers
-    )
-    assert response.status_code == 409, response.text
-    error = response.json()["error"]
-    assert error["code"] == "AGENT_HAS_HISTORY"
-    detail = error["details"][0]
-    assert detail["versions_count"] == 1
-    assert detail["releases_count"] == 1
-    assert detail["runs_count"] == 0
+    removed = await api_client.delete(f"/api/v1/agents/{agent['id']}", headers=admin_headers)
+    assert removed.status_code == 204, removed.text
 
-    still_there = await api_client.get(
-        f"/api/v1/agents/{agent['id']}", headers=admin_headers
+    gone = await api_client.get(f"/api/v1/agents/{agent['id']}", headers=admin_headers)
+    assert gone.status_code == 404
+
+    listed = await api_client.get("/api/v1/agents", headers=admin_headers)
+    assert all(item["id"] != agent["id"] for item in listed.json()["items"])
+
+    blocked = await api_client.post(
+        f"/api/v1/agents/{agent['id']}/invoke",
+        headers=admin_headers,
+        json={"env": "DEV", "input": {}},
     )
-    assert still_there.status_code == 200
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["error"]["code"] == "AGENT_DELETED"
+    assert await _run_count(tenant_env.tenant_id) == 0
+
+    # 历史行全部保留，只是被 deleted_at 隐藏
+    async with session_scope(tenant_env.tenant_id) as session:
+        row = (
+            await session.execute(
+                text(
+                    "select deleted_at, status from agent.agent "
+                    "where id = cast(:aid as uuid)"
+                ),
+                {"aid": agent["id"]},
+            )
+        ).one()
+        versions = await session.scalar(
+            text(
+                "select count(*) from agent.agent_version where agent_id = cast(:aid as uuid)"
+            ),
+            {"aid": agent["id"]},
+        )
+        releases = await session.scalar(
+            text(
+                "select count(*) from agent.agent_release where agent_id = cast(:aid as uuid)"
+            ),
+            {"aid": agent["id"]},
+        )
+    assert row.deleted_at is not None
+    assert row.status == "ACTIVE"  # 软删除不改状态
+    assert versions == 1
+    assert releases == 1
+
+    # 编码释放，可以重新用同名编码建新 Agent
+    recreated = await api_client.post(
+        "/api/v1/agents", headers=admin_headers, json={"code": code, "name": "Reborn"}
+    )
+    assert recreated.status_code == 201, recreated.text
+    assert recreated.json()["id"] != agent["id"]
 
 
 async def test_lifecycle_writes_append_audit_events(

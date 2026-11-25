@@ -180,6 +180,40 @@ class PromptRepository:
         await session.flush()
         return prompt
 
+    async def count_agent_version_references(
+        self, session: AsyncSession, *, tenant_id: uuid.UUID, prompt_id: uuid.UUID
+    ) -> int:
+        """引用关系记在 agent 上下文的绑定表里，这里只读计数。
+
+        函数内导入，避免 catalog 与 agent 在模块加载期互相牵连。
+        已软删除的 Agent 不算占用：它的版本不会再被执行，否则删掉的 Agent 会永久
+        阻塞 Prompt 删除。
+        """
+        from agent_platform.contexts.agent.domain.enums import BindingResourceType
+        from agent_platform.contexts.agent.infrastructure.tables import (
+            Agent,
+            AgentVersion,
+            AgentVersionBinding,
+        )
+
+        total = await session.scalar(
+            select(func.count())
+            .select_from(AgentVersionBinding)
+            .join(AgentVersion, AgentVersion.id == AgentVersionBinding.agent_version_id)
+            .join(Agent, Agent.id == AgentVersion.agent_id)
+            .where(
+                AgentVersionBinding.tenant_id == tenant_id,
+                AgentVersionBinding.resource_type == BindingResourceType.PROMPT_VERSION,
+                AgentVersionBinding.resource_id == prompt_id,
+                Agent.deleted_at.is_(None),
+            )
+        )
+        return int(total or 0)
+
+    async def delete(self, session: AsyncSession, *, prompt: Prompt) -> None:
+        """删除 Prompt 行；版本由外键级联清除。"""
+        await session.delete(prompt)
+
 
 class PromptVersionRepository:
     async def by_id(

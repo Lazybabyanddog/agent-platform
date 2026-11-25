@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+
+import structlog
 
 from agent_platform.contexts.agent.application.release_service import agent_release_service
 from agent_platform.contexts.agent.domain.enums import AgentStatus, Environment
@@ -59,12 +61,13 @@ from agent_platform.shared.errors import (
     ResourceUnavailableError,
     SyncTimeoutExceededError,
 )
+from agent_platform.shared.logging import get_logger
 
 ModelFactory = Callable[[ActorContext, dict[str, Any], float], Awaitable[ModelPort]]
 ToolFactory = Callable[[ActorContext], ToolPort]
 RecorderFactory = Callable[[ActorContext], CallRecorder]
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +98,10 @@ class InvocationService:
         session_id: str | None = None,
         timeout_s: float | None = None,
     ) -> InvocationResult:
+        release_id: uuid.UUID | None
+        version_id: uuid.UUID | None
+        digest: str | None
+        thread_id: str | None
         binding = await session_service.resolve_invoke(
             actor=actor, agent_id=agent_id, env=env, session_key=session_id
         )
@@ -106,7 +113,7 @@ class InvocationService:
             release_id = release.id
             version_id = version.id
             digest = version.config_hash
-            thread_id: str | None = None
+            thread_id = None
         else:
             # 绑定会话不再重解析指针；引用复检失败即失败关闭，避免静默换配置
             problems = await self._reference_problems(actor=actor, snapshot=binding.snapshot)
@@ -120,7 +127,7 @@ class InvocationService:
             thread_id = binding.thread_id
 
         try:
-            return await self.execute_snapshot(
+            result = await self.execute_snapshot(
                 actor=actor,
                 agent_id=agent_id,
                 env=env,
@@ -139,6 +146,9 @@ class InvocationService:
         finally:
             if binding is not None:
                 await session_service.release(actor=actor, binding=binding)
+        if binding is not None:
+            await session_service.record_turn(actor=actor, binding=binding, values=values)
+        return result
 
     async def execute_snapshot(
         self,
@@ -189,6 +199,7 @@ class InvocationService:
             )
         effective_timeout = min(requested, float(policy["timeout_s"]))
 
+        started = time.perf_counter()
         trace_id = get_trace_id() or str(uuid.uuid4())
         run_id = await self._create_run(
             actor=actor,
@@ -206,94 +217,125 @@ class InvocationService:
         )
         thread_id = thread_id or str(run_id)
 
-        try:
-            model = await (self._model_factory or default_model_factory)(
-                actor, snapshot, effective_timeout
-            )
-        except Exception as exc:  # noqa: BLE001 - 失败必须落到 run，不能留下 RUNNING
-            error = {
-                "code": RunErrorCode.MODEL_ERROR.value,
-                "message": "model is not available for execution",
-                "details": {"reason": "model_unavailable", "message": str(exc)},
-            }
-            await self._finish_failed(actor=actor, run_id=run_id, error=error)
-            return InvocationResult(
-                run_id=run_id,
-                trace_id=trace_id,
-                status=RunStatus.FAILED,
-                output=None,
-                usage={"steps": 0, "tokens": 0},
-                error=error,
-            )
-        tool_port = (self._tool_factory or default_tool_factory)(actor)
-        try:
-            checkpointer = await self._checkpoint_provider.saver()
-        except Exception as exc:  # noqa: BLE001 - checkpoint 属于辅助能力，不阻断执行
-            logger.warning("checkpointer unavailable, continuing without it: %s", exc)
-            checkpointer = None
+        # 本次运行的所有日志（含模型/工具/MCP 调用）自动带上 run_id
+        with structlog.contextvars.bound_contextvars(run_id=str(run_id)):
 
-        # 轨迹记录挂在端口外层：失败不影响执行，且同一次运行共享 trace_id
-        recorder = (self._recorder_factory or default_recorder_factory)(actor)
-        model = TracingModelPort(
-            model,
-            recorder=recorder,
-            run_id=run_id,
-            trace_id=trace_id,
-            model_id=uuid.UUID(str(snapshot["model"]["model_id"])),
-            model_name=str(snapshot["model"]["model_name"]),
-        )
-        tool_port = TracingToolPort(
-            tool_port,
-            recorder=recorder,
-            run_id=run_id,
-            trace_id=trace_id,
-            tools=tool_index(snapshot),
-        )
+            def _log_end(status: RunStatus, steps: int, tokens: int, error_code: str | None = None) -> None:
+                logger.info(
+                    "invocation.end",
+                    agent_id=str(agent_id),
+                    status=status.value,
+                    steps=steps,
+                    tokens=tokens,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    error_code=error_code,
+                )
 
-        try:
-            result = await execute_snapshot(
-                snapshot=snapshot,
-                model=model,
-                tools=tool_port,
-                input_values=values,
+            logger.info(
+                "invocation.start",
+                agent_id=str(agent_id),
+                release_id=str(agent_release_id),
+                env=getattr(env, "value", str(env)),
+                kind=getattr(kind, "value", kind),
                 timeout_s=effective_timeout,
-                checkpointer=checkpointer,
-                thread_id=thread_id,
+                session_id=session_id,
             )
-        except AgentRuntimeError as exc:
-            error = {
-                "code": exc.code.value,
-                "message": exc.message,
-                "details": exc.details,
-            }
-            await self._finish_failed(actor=actor, run_id=run_id, error=error)
+            try:
+                model = await (self._model_factory or default_model_factory)(
+                    actor, snapshot, effective_timeout
+                )
+            except Exception as exc:  # noqa: BLE001 - 失败必须落到 run，不能留下 RUNNING
+                error: dict[str, Any] = {
+                    "code": RunErrorCode.MODEL_ERROR.value,
+                    "message": "model is not available for execution",
+                    "details": {"reason": "model_unavailable", "message": str(exc)},
+                }
+                await self._finish_failed(actor=actor, run_id=run_id, error=error)
+                _log_end(RunStatus.FAILED, 0, 0, error["code"])
+                return InvocationResult(
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    status=RunStatus.FAILED,
+                    output=None,
+                    usage={"steps": 0, "tokens": 0},
+                    error=error,
+                )
+            tool_port = (self._tool_factory or default_tool_factory)(actor)
+            try:
+                checkpointer = await self._checkpoint_provider.saver()
+            except Exception as exc:  # noqa: BLE001 - checkpoint 属于辅助能力，不阻断执行
+                logger.warning("checkpointer.unavailable", error=str(exc))
+                checkpointer = None
+
+            # 轨迹记录挂在端口外层：失败不影响执行，且同一次运行共享 trace_id
+            recorder = (self._recorder_factory or default_recorder_factory)(actor)
+            model = TracingModelPort(
+                model,
+                recorder=recorder,
+                run_id=run_id,
+                trace_id=trace_id,
+                model_id=uuid.UUID(str(snapshot["model"]["model_id"])),
+                model_name=str(snapshot["model"]["model_name"]),
+            )
+            tool_port = TracingToolPort(
+                tool_port,
+                recorder=recorder,
+                run_id=run_id,
+                trace_id=trace_id,
+                tools=tool_index(snapshot),
+            )
+
+            try:
+                result = await execute_snapshot(
+                    snapshot=snapshot,
+                    model=model,
+                    tools=tool_port,
+                    input_values=values,
+                    timeout_s=effective_timeout,
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
+                )
+            except AgentRuntimeError as exc:
+                error = {
+                    "code": exc.code.value,
+                    "message": exc.message,
+                    "details": exc.details,
+                }
+                await self._finish_failed(actor=actor, run_id=run_id, error=error)
+                _log_end(
+                    RunStatus.FAILED,
+                    int(exc.details.get("used_steps") or 0),
+                    int(exc.details.get("used_tokens") or 0),
+                    error["code"],
+                )
+                return InvocationResult(
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    status=RunStatus.FAILED,
+                    output=None,
+                    usage={
+                        "steps": int(exc.details.get("used_steps") or 0),
+                        "tokens": int(exc.details.get("used_tokens") or 0),
+                    },
+                    error=error,
+                )
+
+            await self._finish_success(
+                actor=actor,
+                run_id=run_id,
+                result=result,
+                thread_id=thread_id,
+                history_token_limit=int(policy.get("history_token_limit") or 4000),
+            )
+            _log_end(RunStatus.SUCCESS, result.used_steps, result.used_tokens)
             return InvocationResult(
                 run_id=run_id,
                 trace_id=trace_id,
-                status=RunStatus.FAILED,
-                output=None,
-                usage={
-                    "steps": int(exc.details.get("used_steps") or 0),
-                    "tokens": int(exc.details.get("used_tokens") or 0),
-                },
-                error=error,
+                status=RunStatus.SUCCESS,
+                output=result.output,
+                usage={"steps": result.used_steps, "tokens": result.used_tokens},
+                checkpoint_id=result.checkpoint_id,
             )
-
-        await self._finish_success(
-            actor=actor,
-            run_id=run_id,
-            result=result,
-            thread_id=thread_id,
-            history_token_limit=int(policy.get("history_token_limit") or 4000),
-        )
-        return InvocationResult(
-            run_id=run_id,
-            trace_id=trace_id,
-            status=RunStatus.SUCCESS,
-            output=result.output,
-            usage={"steps": result.used_steps, "tokens": result.used_tokens},
-            checkpoint_id=result.checkpoint_id,
-        )
 
     # ------------------------------------------------------------------
 
@@ -302,11 +344,20 @@ class InvocationService:
     ) -> tuple[AgentRelease, AgentVersion]:
         """受理时一次性固定发布记录与版本，后续步骤不再读指针。"""
         async with session_scope(actor.tenant_id) as session:
-            agent = await AgentRepository().by_id(
+            # 这里要区分"从未存在"与"已软删除"，所以包含已删除行一起取。
+            agent = await AgentRepository().by_id_including_deleted(
                 session, tenant_id=actor.tenant_id, agent_id=agent_id
             )
             if agent is None:
                 raise NotFoundError("agent not found")
+            if agent.deleted_at is not None:
+                raise ConflictError(
+                    "agent has been deleted",
+                    code="AGENT_DELETED",
+                    details=[
+                        {"field": "agent_id", "deleted_at": agent.deleted_at.isoformat()}
+                    ],
+                )
             # 状态门禁先于指针读取：停用/归档立即失败关闭，错误码可区分。
             # DRAFT 尚无发布，继续走指针查询以保留 404 语义。
             if agent.status == AgentStatus.ARCHIVED:

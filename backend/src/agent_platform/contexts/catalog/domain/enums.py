@@ -43,3 +43,17 @@ class RiskLevel(StrEnum):
     READ_ONLY = "READ_ONLY"
     WRITE = "WRITE"
     HIGH = "HIGH"
+
+
+class McpProbeVerdict(StrEnum):
+    """MCP 工具探测的结论。
+
+    刻意不复用 `ProbeVerdict`：那套取值全是模型语义（`MODEL_NOT_FOUND` 等），
+    混用会让前端在 MCP 场景下拿到无法解释的结论。
+    """
+
+    OK = "OK"
+    MCP_PROBE_AUTH_FAILED = "MCP_PROBE_AUTH_FAILED"
+    MCP_PROBE_TIMEOUT = "MCP_PROBE_TIMEOUT"
+    MCP_PROBE_UNREACHABLE = "MCP_PROBE_UNREACHABLE"
+    MCP_PROBE_PROTOCOL_ERROR = "MCP_PROBE_PROTOCOL_ERROR"

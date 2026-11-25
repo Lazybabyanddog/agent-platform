@@ -19,7 +19,24 @@ from agent_platform.contexts.agent.infrastructure.tables import (
 
 
 class AgentRepository:
+    """未删除（`deleted_at is null`）是默认可见范围，读取路径一律按它过滤。
+
+    需要触达已删除行的地方（如调用门禁要区分"不存在"与"已删除"）显式使用
+    `by_id_including_deleted`，避免"软删除"被某个分支悄悄绕过。
+    """
+
     async def by_id(
+        self, session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+    ) -> Agent | None:
+        return await session.scalar(
+            select(Agent).where(
+                Agent.tenant_id == tenant_id,
+                Agent.id == agent_id,
+                Agent.deleted_at.is_(None),
+            )
+        )
+
+    async def by_id_including_deleted(
         self, session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
     ) -> Agent | None:
         return await session.scalar(
@@ -30,13 +47,19 @@ class AgentRepository:
         self, session: AsyncSession, *, tenant_id: uuid.UUID, code: str
     ) -> Agent | None:
         return await session.scalar(
-            select(Agent).where(Agent.tenant_id == tenant_id, Agent.code == code)
+            select(Agent).where(
+                Agent.tenant_id == tenant_id,
+                Agent.code == code,
+                Agent.deleted_at.is_(None),
+            )
         )
 
     async def list(self, session: AsyncSession, *, tenant_id: uuid.UUID) -> list[Agent]:
         return list(
             await session.scalars(
-                select(Agent).where(Agent.tenant_id == tenant_id).order_by(Agent.code)
+                select(Agent)
+                .where(Agent.tenant_id == tenant_id, Agent.deleted_at.is_(None))
+                .order_by(Agent.code)
             )
         )
 
@@ -49,7 +72,7 @@ class AgentRepository:
         tag: str | None,
         q: str | None,
     ) -> list[Any]:
-        conditions: list[Any] = [Agent.tenant_id == tenant_id]
+        conditions: list[Any] = [Agent.tenant_id == tenant_id, Agent.deleted_at.is_(None)]
         if status is not None:
             conditions.append(Agent.status == status)
         if agent_type is not None:

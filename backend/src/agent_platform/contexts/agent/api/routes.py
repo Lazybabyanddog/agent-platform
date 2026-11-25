@@ -90,6 +90,7 @@ async def create_agent(payload: AgentCreateRequest, actor: CurrentActor) -> Agen
         tool_version_ids=config.tool_version_ids if config else None,
         params=config.params if config else None,
         policy=config.policy if config else None,
+        runtime_context=config.runtime_context if config else None,
     )
     return _agent_response(agent)
 
@@ -217,8 +218,8 @@ async def archive_agent(agent_id: uuid.UUID, actor: CurrentActor) -> AgentRespon
     status_code=status.HTTP_204_NO_CONTENT,
     tags=["agents"],
     description=(
-        "删除从未产生版本、发布与运行记录的 Agent，编码随之释放；"
-        "存在任一历史时返回 409 `AGENT_HAS_HISTORY` 并提示改为归档。"
+        "软删除 Agent：立即从列表与详情消失、编码随之释放，版本、发布与运行记录保留；"
+        "对已删除 Agent 的调用返回 409 `AGENT_DELETED`，再次删除返回 404。"
     ),
 )
 async def delete_agent(agent_id: uuid.UUID, actor: CurrentActor) -> None:
@@ -249,6 +250,7 @@ async def create_agent_version(
         tool_version_ids=payload.tool_version_ids,
         params=payload.params,
         policy=payload.policy,
+        runtime_context=payload.runtime_context,
         note=payload.note,
         base_version_id=payload.base_version_id,
     )

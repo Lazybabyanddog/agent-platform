@@ -28,6 +28,10 @@ class PreviewRequest(BaseModel):
     tool_version_ids: list[uuid.UUID] = Field(default_factory=list)
     params: dict[str, Any] = Field(default_factory=dict)
     policy: dict[str, Any] = Field(default_factory=dict)
+    runtime_context: list[str] = Field(
+        default_factory=list,
+        description="要注入的运行时事实（now/timezone），与保存版本共用同一套校验",
+    )
     input: dict[str, Any] = Field(default_factory=dict)
     preview_session_id: str | None = Field(
         default=None, max_length=128, description="可选，用于串联同一调试会话的多轮消息"
@@ -73,6 +77,11 @@ class SessionItemResponse(BaseModel):
     last_active_at: datetime
     expires_at: datetime
     created_at: datetime
+    title: str | None = Field(default=None, description="首轮输入摘要；正文留存关闭时为空")
+    turn_count: int = Field(default=0, description="已产生运行的轮数")
+    owned: bool = Field(default=True, description="是否由当前调用者创建；false 为历史遗留会话")
+    expired: bool = Field(default=False, description="是否已过期；过期会话历史只读")
+    preview_config_hash: str | None = None
 
 
 class SessionPageResponse(BaseModel):
@@ -80,3 +89,37 @@ class SessionPageResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class SessionHistoryMessageResponse(BaseModel):
+    content: str | None = Field(default=None, description="正文留存关闭或无内容时为空")
+    length: int = 0
+
+
+class SessionHistoryToolResponse(BaseModel):
+    name: str
+    status: str
+    latency_ms: int | None = None
+    error: str | None = None
+
+
+class SessionHistoryTurnResponse(BaseModel):
+    index: int
+    user: SessionHistoryMessageResponse
+    assistant: SessionHistoryMessageResponse | None = None
+    tools: list[SessionHistoryToolResponse] = Field(default_factory=list)
+    run_id: uuid.UUID | None = None
+    trace_id: str | None = None
+    status: RunStatus | None = None
+    error: dict[str, Any] | None = None
+    started_at: datetime | None = None
+
+
+class SessionHistoryResponse(BaseModel):
+    session: SessionItemResponse
+    turns: list[SessionHistoryTurnResponse]
+    truncated: bool = False
+    reconstructed: bool = Field(
+        default=False,
+        description="轮次由运行记录重建（线程中缺少用户消息锚点）；回答可能不完整",
+    )

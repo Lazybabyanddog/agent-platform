@@ -92,17 +92,17 @@
 
 ### Requirement: 归档与删除
 
-系统 SHALL 支持归档 Agent，归档后该 Agent 只读，MUST NOT 被发布、启用或调用。系统 SHALL 仅在 Agent 从未产生版本、发布记录与运行记录时允许删除；其余情况 MUST 拒绝删除并提示改用归档。删除 SHALL 释放编码以便重新创建。归档与删除 SHALL 产生审计事件。
+系统 SHALL 支持归档 Agent，归档后该 Agent 只读，MUST NOT 被发布、启用或调用。系统 SHALL 支持删除 Agent，删除 MUST 为软删除：Agent 立即从列表与详情消失、编码释放以便重新创建，版本、发布与运行历史 MUST 保留以便回溯。对已删除 Agent 的调用 MUST 返回 `AGENT_DELETED`，重复删除 MUST 返回 404。归档与删除 SHALL 产生审计事件。
 
-#### Scenario: 删除空壳 Agent
+#### Scenario: 删除 Agent 释放编码并保留历史
 
-- **WHEN** 管理员删除一个从未生成版本、从未发布、从未被调用的 Agent
-- **THEN** Agent 被删除，同一编码可再次用于创建
+- **WHEN** 管理员删除一个已发布、已有运行历史的 Agent
+- **THEN** 该 Agent 从列表与详情消失，同一编码可再次用于创建，且其版本、发布与运行记录仍可查询
 
-#### Scenario: 拒绝删除有历史的 Agent
+#### Scenario: 调用已删除的 Agent
 
-- **WHEN** 管理员删除一个存在历史版本的 Agent
-- **THEN** 系统拒绝删除并提示改为归档
+- **WHEN** 调用方通过任一环境调用一个已软删除的 Agent
+- **THEN** 系统返回 409 `AGENT_DELETED`，不产生新的运行记录
 
 #### Scenario: 归档后不可调用
 

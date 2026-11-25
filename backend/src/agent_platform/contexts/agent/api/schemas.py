@@ -30,6 +30,13 @@ class AgentConfigRequest(BaseModel):
             "缺省时使用默认值"
         ),
     )
+    runtime_context: list[str] = Field(
+        default_factory=list,
+        description=(
+            "运行时上下文依赖声明：now（当前日期时间）、timezone（时区）；"
+            "由服务端生成并注入，未声明的不会出现在 Prompt 中"
+        ),
+    )
 
 
 class AgentCreateRequest(BaseModel):
@@ -152,6 +159,14 @@ class ToolsDiff(BaseModel):
     changed: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class RuntimeContextDiff(BaseModel):
+    """运行时上下文只比较「需要哪些事实」，不比较事实值。"""
+
+    changed: bool
+    base: list[str] = Field(default_factory=list)
+    target: list[str] = Field(default_factory=list)
+
+
 class AgentVersionDiffResponse(BaseModel):
     base_version_no: int
     target_version_no: int
@@ -161,6 +176,7 @@ class AgentVersionDiffResponse(BaseModel):
     prompt: ComponentDiff
     tools: ToolsDiff
     policy: dict[str, dict[str, Any]]
+    runtime_context: RuntimeContextDiff
 
 
 class BindingReadiness(BaseModel):

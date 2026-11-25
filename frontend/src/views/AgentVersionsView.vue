@@ -12,6 +12,7 @@ import {
   type AgentVersionDiff,
 } from '@/api/endpoints'
 import JsonBlock from '@/components/JsonBlock.vue'
+import { RUNTIME_CONTEXT_OPTIONS } from '@/composables/useAgentConfigEditor'
 
 const route = useRoute()
 const router = useRouter()
@@ -56,6 +57,16 @@ function toolNames(kind: 'added' | 'removed' | 'changed'): string[] {
   return items.map((item) =>
     String(item.tool_code ?? item.tool_version_id ?? item.tool_id ?? '未命名工具'),
   )
+}
+
+const runtimeContextDiff = computed(() => diff.value?.runtime_context ?? null)
+
+function runtimeItems(items: string[] | undefined): string[] {
+  return items ?? []
+}
+
+function runtimeLabel(value: string): string {
+  return RUNTIME_CONTEXT_OPTIONS.find((item) => item.value === value)?.label ?? value
 }
 
 async function load(): Promise<void> {
@@ -268,6 +279,43 @@ onMounted(load)
               {{ name }}
             </el-tag>
             <span v-if="!toolNames('changed').length" class="page-hint">无</span>
+          </div>
+        </div>
+
+        <div class="diff-block">
+          <div class="diff-title">
+            运行时上下文
+            <el-tag :type="runtimeContextDiff?.changed ? 'warning' : 'info'" size="small">
+              {{ runtimeContextDiff?.changed ? '已变更' : '未变更' }}
+            </el-tag>
+          </div>
+          <div class="tool-row">
+            <span class="tool-label">基线</span>
+            <el-tag
+              v-for="item in runtimeItems(runtimeContextDiff?.base)"
+              :key="`ctx-base-${item}`"
+              type="info"
+              effect="plain"
+            >
+              {{ runtimeLabel(item) }}
+            </el-tag>
+            <span v-if="!runtimeItems(runtimeContextDiff?.base).length" class="page-hint">
+              未声明（不注入）
+            </span>
+          </div>
+          <div class="tool-row">
+            <span class="tool-label">目标</span>
+            <el-tag
+              v-for="item in runtimeItems(runtimeContextDiff?.target)"
+              :key="`ctx-target-${item}`"
+              type="success"
+              effect="plain"
+            >
+              {{ runtimeLabel(item) }}
+            </el-tag>
+            <span v-if="!runtimeItems(runtimeContextDiff?.target).length" class="page-hint">
+              未声明（不注入）
+            </span>
           </div>
         </div>
 

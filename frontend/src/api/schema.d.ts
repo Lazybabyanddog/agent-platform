@@ -90,23 +90,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tenants/{tenant_id}/insight-retention": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        /** Set Insight Retention */
-        patch: operations["set_insight_retention_api_v1_tenants__tenant_id__insight_retention_patch"];
-        trace?: never;
-    };
     "/api/v1/tenants/{tenant_id}/status": {
         parameters: {
             query?: never;
@@ -500,7 +483,11 @@ export interface paths {
         get: operations["get_prompt_api_v1_prompts__prompt_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Prompt
+         * @description 删除 Prompt 及其全部版本，编码随之释放；仍被 Agent 版本引用时返回 409 `PROMPT_IN_USE`，需先解除引用。
+         */
+        delete: operations["delete_prompt_api_v1_prompts__prompt_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -587,6 +574,29 @@ export interface paths {
         put?: never;
         /** Create Tool */
         post: operations["create_tool_api_v1_tools_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tools/probe-mcp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Probe Mcp Tool
+         * @description 连远端取工具清单，供注册前填充契约。
+         *
+         *     与创建工具同权（`TOOL_MANAGE`）：探测会让服务端主动连接给定地址，
+         *     不具备工具管理权的人不应拥有这个能力。探测不落库，不产生工具或版本。
+         */
+        post: operations["probe_mcp_tool_api_v1_tools_probe_mcp_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -741,7 +751,7 @@ export interface paths {
         post?: never;
         /**
          * Delete Agent
-         * @description 删除从未产生版本、发布与运行记录的 Agent，编码随之释放；存在任一历史时返回 409 `AGENT_HAS_HISTORY` 并提示改为归档。
+         * @description 软删除 Agent：立即从列表与详情消失、编码随之释放，版本、发布与运行记录保留；对已删除 Agent 的调用返回 409 `AGENT_DELETED`，再次删除返回 404。
          */
         delete: operations["delete_agent_api_v1_agents__agent_id__delete"];
         options?: never;
@@ -982,9 +992,29 @@ export interface paths {
         };
         /**
          * List Sessions
-         * @description 按 Agent 与活跃时间范围列出会话及其绑定版本（只含当前租户）。
+         * @description 按 Agent 列出会话及其绑定版本（只含当前租户），按最近活动倒序分页。默认只返回本人创建的会话（`mine_only=true`），未记录创建者的存量会话在同租户内可见；过期会话默认仍返回并标记 `expired=true`。
          */
         get: operations["list_sessions_api_v1_sessions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Session History
+         * @description 只读回放：从会话线程读取结构化轮次（用户输入、回答、该轮工具条目与运行元数据），不产生运行、不改动会话绑定。正文留存关闭时只返回长度与工具摘要；他人会话与不存在会话统一 404。
+         */
+        get: operations["get_session_history_api_v1_sessions__session_id__history_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1118,6 +1148,11 @@ export interface components {
             policy?: {
                 [key: string]: unknown;
             };
+            /**
+             * Runtime Context
+             * @description 运行时上下文依赖声明：now（当前日期时间）、timezone（时区）；由服务端生成并注入，未声明的不会出现在 Prompt 中
+             */
+            runtime_context?: string[];
         };
         /** AgentCopyRequest */
         AgentCopyRequest: {
@@ -1365,6 +1400,11 @@ export interface components {
             policy?: {
                 [key: string]: unknown;
             };
+            /**
+             * Runtime Context
+             * @description 运行时上下文依赖声明：now（当前日期时间）、timezone（时区）；由服务端生成并注入，未声明的不会出现在 Prompt 中
+             */
+            runtime_context?: string[];
             /** Note */
             note?: string | null;
             /**
@@ -1392,6 +1432,7 @@ export interface components {
                     [key: string]: unknown;
                 };
             };
+            runtime_context: components["schemas"]["RuntimeContextDiff"];
         };
         /** AgentVersionResponse */
         AgentVersionResponse: {
@@ -1613,11 +1654,6 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
-        /** InsightRetentionRequest */
-        InsightRetentionRequest: {
-            /** Enabled */
-            enabled: boolean;
-        };
         /** InvokeRequest */
         InvokeRequest: {
             env: components["schemas"]["Environment"];
@@ -1686,6 +1722,62 @@ export interface components {
             /** Permissions */
             permissions: string[];
         };
+        /**
+         * McpProbeRequest
+         * @description 探测入参：只有「连到哪里、怎么连」，没有 tool_name——那正是探测的产出。
+         */
+        McpProbeRequest: {
+            /**
+             * Transport
+             * @default streamable_http
+             */
+            transport: string;
+            /** Url */
+            url: string;
+            /** Auth */
+            auth?: {
+                [key: string]: unknown;
+            };
+            /** Headers */
+            headers?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Timeout S
+             * @default 15
+             */
+            timeout_s: number;
+        };
+        /** McpProbeResponse */
+        McpProbeResponse: {
+            verdict: components["schemas"]["McpProbeVerdict"];
+            /** Tools */
+            tools: components["schemas"]["McpProbeToolResponse"][];
+            /** Latency Ms */
+            latency_ms: number;
+            /** Error Summary */
+            error_summary: string | null;
+        };
+        /** McpProbeToolResponse */
+        McpProbeToolResponse: {
+            /** Name */
+            name: string;
+            /** Description */
+            description: string | null;
+            /** Input Schema */
+            input_schema: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /**
+         * McpProbeVerdict
+         * @description MCP 工具探测的结论。
+         *
+         *     刻意不复用 `ProbeVerdict`：那套取值全是模型语义（`MODEL_NOT_FOUND` 等），
+         *     混用会让前端在 MCP 场景下拿到无法解释的结论。
+         * @enum {string}
+         */
+        McpProbeVerdict: "OK" | "MCP_PROBE_AUTH_FAILED" | "MCP_PROBE_TIMEOUT" | "MCP_PROBE_UNREACHABLE" | "MCP_PROBE_PROTOCOL_ERROR";
         /** MeResponse */
         MeResponse: {
             /**
@@ -1932,6 +2024,11 @@ export interface components {
             policy?: {
                 [key: string]: unknown;
             };
+            /**
+             * Runtime Context
+             * @description 要注入的运行时事实（now/timezone），与保存版本共用同一套校验
+             */
+            runtime_context?: string[];
             /** Input */
             input?: {
                 [key: string]: unknown;
@@ -2365,6 +2462,18 @@ export interface components {
             /** Slowest Latency Ms */
             slowest_latency_ms?: number | null;
         };
+        /**
+         * RuntimeContextDiff
+         * @description 运行时上下文只比较「需要哪些事实」，不比较事实值。
+         */
+        RuntimeContextDiff: {
+            /** Changed */
+            changed: boolean;
+            /** Base */
+            base?: string[];
+            /** Target */
+            target?: string[];
+        };
         /** SecretCreateRequest */
         SecretCreateRequest: {
             /** Name */
@@ -2399,6 +2508,67 @@ export interface components {
         SecretRotateRequest: {
             /** Value */
             value: string;
+        };
+        /** SessionHistoryMessageResponse */
+        SessionHistoryMessageResponse: {
+            /**
+             * Content
+             * @description 正文留存关闭或无内容时为空
+             */
+            content?: string | null;
+            /**
+             * Length
+             * @default 0
+             */
+            length: number;
+        };
+        /** SessionHistoryResponse */
+        SessionHistoryResponse: {
+            session: components["schemas"]["SessionItemResponse"];
+            /** Turns */
+            turns: components["schemas"]["SessionHistoryTurnResponse"][];
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+            /**
+             * Reconstructed
+             * @description 轮次由运行记录重建（线程中缺少用户消息锚点）；回答可能不完整
+             * @default false
+             */
+            reconstructed: boolean;
+        };
+        /** SessionHistoryToolResponse */
+        SessionHistoryToolResponse: {
+            /** Name */
+            name: string;
+            /** Status */
+            status: string;
+            /** Latency Ms */
+            latency_ms?: number | null;
+            /** Error */
+            error?: string | null;
+        };
+        /** SessionHistoryTurnResponse */
+        SessionHistoryTurnResponse: {
+            /** Index */
+            index: number;
+            user: components["schemas"]["SessionHistoryMessageResponse"];
+            assistant?: components["schemas"]["SessionHistoryMessageResponse"] | null;
+            /** Tools */
+            tools?: components["schemas"]["SessionHistoryToolResponse"][];
+            /** Run Id */
+            run_id?: string | null;
+            /** Trace Id */
+            trace_id?: string | null;
+            status?: components["schemas"]["RunStatus"] | null;
+            /** Error */
+            error?: {
+                [key: string]: unknown;
+            } | null;
+            /** Started At */
+            started_at?: string | null;
         };
         /** SessionItemResponse */
         SessionItemResponse: {
@@ -2438,6 +2608,31 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /**
+             * Title
+             * @description 首轮输入摘要；正文留存关闭时为空
+             */
+            title?: string | null;
+            /**
+             * Turn Count
+             * @description 已产生运行的轮数
+             * @default 0
+             */
+            turn_count: number;
+            /**
+             * Owned
+             * @description 是否由当前调用者创建；false 为历史遗留会话
+             * @default true
+             */
+            owned: boolean;
+            /**
+             * Expired
+             * @description 是否已过期；过期会话历史只读
+             * @default false
+             */
+            expired: boolean;
+            /** Preview Config Hash */
+            preview_config_hash?: string | null;
         };
         /** SessionPageResponse */
         SessionPageResponse: {
@@ -2476,8 +2671,6 @@ export interface components {
             /** Name */
             name: string;
             status: components["schemas"]["TenantStatus"];
-            /** Content Retention Enabled */
-            content_retention_enabled: boolean;
             /**
              * Created At
              * Format: date-time
@@ -2681,6 +2874,10 @@ export interface components {
             risk_level: components["schemas"]["RiskLevel"];
             /** Config Hash */
             config_hash: string;
+            /** Warnings */
+            warnings?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Created At
              * Format: date-time
@@ -2996,41 +3193,6 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TenantResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    set_insight_retention_api_v1_tenants__tenant_id__insight_retention_patch: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                tenant_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["InsightRetentionRequest"];
-            };
-        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -3987,6 +4149,35 @@ export interface operations {
             };
         };
     };
+    delete_prompt_api_v1_prompts__prompt_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                prompt_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_prompt_versions_api_v1_prompts__prompt_id__versions_get: {
         parameters: {
             query?: never;
@@ -4191,6 +4382,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ToolResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    probe_mcp_tool_api_v1_tools_probe_mcp_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["McpProbeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpProbeResponse"];
                 };
             };
             /** @description Validation Error */
@@ -5088,8 +5312,11 @@ export interface operations {
             query: {
                 agent_id: string;
                 kind?: components["schemas"]["RunKind"] | null;
+                env?: components["schemas"]["Environment"] | null;
                 start?: string | null;
                 end?: string | null;
+                include_expired?: boolean;
+                mine_only?: boolean;
                 page?: number;
                 page_size?: number;
             };
@@ -5106,6 +5333,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionPageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_session_history_api_v1_sessions__session_id__history_get: {
+        parameters: {
+            query?: {
+                turns_limit?: number | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionHistoryResponse"];
                 };
             };
             /** @description Validation Error */

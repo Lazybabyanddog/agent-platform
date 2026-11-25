@@ -23,6 +23,7 @@ const navItems = [
   { path: '/prompts', label: 'Prompt 管理' },
   { path: '/tools', label: '工具管理' },
   { path: '/models', label: '模型配置', permission: 'model:read' },
+  { path: '/secrets', label: '凭据管理', permission: 'secret:manage' },
   { path: '/releases', label: '发布与回滚', permission: 'run:read' },
   { path: '/playground', label: '调试台', permission: 'agent:invoke' },
 ]
@@ -86,7 +87,7 @@ function shorten(value: string): string {
         </div>
       </el-header>
       <el-main class="content">
-        <router-view :key="route.fullPath" />
+        <router-view :key="route.path" />
       </el-main>
     </el-container>
   </el-container>

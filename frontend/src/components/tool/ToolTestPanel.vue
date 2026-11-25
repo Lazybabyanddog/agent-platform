@@ -44,6 +44,70 @@ watch(
   { immediate: true },
 )
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * 按 JSON Schema 生成入参骨架：枚举取首项、有 default 用 default，
+ * 嵌套对象只展开 required 字段，避免只为填一个入参就展开整棵树。
+ */
+function schemaSample(schema: unknown, depth: number): unknown {
+  if (!isPlainObject(schema) || depth > 5) return null
+  const enumValues = Array.isArray(schema.enum) ? schema.enum : []
+  if (enumValues.length) return enumValues[0]
+  if (schema.default !== undefined) return schema.default
+
+  const rawType = schema.type
+  const type = typeof rawType === 'string' ? rawType : Array.isArray(rawType) ? rawType[0] : undefined
+  if (type === 'object' || isPlainObject(schema.properties)) return schemaObject(schema, depth)
+  if (type === 'array') {
+    const item = schemaSample(schema.items, depth + 1)
+    return item === null || item === undefined ? [] : [item]
+  }
+  if (type === 'integer' || type === 'number') return 0
+  if (type === 'boolean') return false
+  if (type === 'string') return ''
+  return null
+}
+
+function schemaObject(schema: Record<string, unknown>, depth: number): Record<string, unknown> {
+  const properties = isPlainObject(schema.properties) ? schema.properties : {}
+  const required = Array.isArray(schema.required)
+    ? schema.required.filter((key): key is string => typeof key === 'string')
+    : []
+  const sample: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(properties)) {
+    if (depth > 0 && !required.includes(key)) continue
+    sample[key] = schemaSample(child, depth + 1)
+  }
+  return sample
+}
+
+/** 入参模板只依赖版本快照里的 input_schema；没有契约时退回空对象。 */
+function argumentsTemplate(version: ToolVersion): string {
+  const schema = isPlainObject(version.spec.input_schema) ? version.spec.input_schema : null
+  const sample = schema ? schemaObject(schema, 0) : {}
+  return JSON.stringify(sample, null, 2)
+}
+
+const seededVersionId = ref('')
+
+function resetArguments(): void {
+  if (selectedVersion.value) argumentsText.value = argumentsTemplate(selectedVersion.value)
+}
+
+watch(
+  selectedVersion,
+  (version) => {
+    // 只在切换版本时重填模板：同一版本内不打扰用户已经改过的入参
+    if (!version || seededVersionId.value === version.id) return
+    seededVersionId.value = version.id
+    argumentsText.value = argumentsTemplate(version)
+  },
+  { immediate: true },
+)
+
 function statusType(status: string): 'success' | 'danger' {
   return status === 'SUCCESS' ? 'success' : 'danger'
 }
@@ -151,8 +215,14 @@ async function execute(): Promise<void> {
             type="textarea"
             :autosize="{ minRows: 5, maxRows: 12 }"
             class="code-input"
-            placeholder='{"text": "hello"}'
+            placeholder="{}"
           />
+          <div class="arg-hint">
+            <span>已按当前版本的 input_schema 生成骨架，可自行修改。</span>
+            <el-button link type="primary" size="small" @click="resetArguments">
+              按契约模板重置
+            </el-button>
+          </div>
         </el-form-item>
         <el-form-item v-if="isHighRisk" label="风险确认">
           <el-checkbox v-model="allowHighRisk">
@@ -220,6 +290,14 @@ async function execute(): Promise<void> {
 .code-input :deep(textarea) {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
+}
+
+.arg-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #8a93a5;
 }
 
 .actions {

@@ -18,7 +18,6 @@ from agent_platform.contexts.platform.api.schemas import (
     AuditLogResponse,
     GrantCreateRequest,
     GrantResponse,
-    InsightRetentionRequest,
     LoginRequest,
     LoginResponse,
     MemberCreateRequest,
@@ -140,21 +139,6 @@ async def list_tenants(actor: CurrentActor, page: CurrentPage) -> Page[TenantRes
 async def get_tenant(tenant_id: uuid.UUID, actor: CurrentActor) -> TenantResponse:
     await authorization.require_permission(actor, Permission.TENANT_READ)
     tenant = await tenant_service.get(tenant_id)
-    return TenantResponse.model_validate(tenant)
-
-
-@router.patch(
-    "/tenants/{tenant_id}/insight-retention",
-    response_model=TenantResponse,
-    tags=["tenants"],
-)
-async def set_insight_retention(
-    tenant_id: uuid.UUID, payload: InsightRetentionRequest, actor: CurrentActor
-) -> TenantResponse:
-    await authorization.require_permission(actor, Permission.TENANT_MANAGE)
-    tenant = await tenant_service.set_content_retention(
-        tenant_id=tenant_id, enabled=payload.enabled, actor=actor
-    )
     return TenantResponse.model_validate(tenant)
 
 

@@ -15,6 +15,31 @@ from agent_platform.shared.hashing import config_hash
 
 SNAPSHOT_SCHEMA_VERSION = 1
 MAX_STEPS_LIMIT = 20
+# 平台能提供的运行时事实；未在版本里声明的不会注入，避免无谓的 Prompt 噪音
+RUNTIME_CONTEXT_ITEMS = ("now", "timezone")
+
+
+def normalize_runtime_context(items: list[str] | None) -> list[str]:
+    """把声明归一化成去重、有序的白名单项。
+
+    只允许平台已支持的事实：声明未知项若被静默忽略，
+    作者会以为模型拿到了数据，实际没有。
+    """
+    if not items:
+        return []
+    normalized: list[str] = []
+    for raw in items:
+        key = str(raw).strip()
+        if not key:
+            continue
+        if key not in RUNTIME_CONTEXT_ITEMS:
+            raise ValidationFailedError.for_field(
+                "runtime_context",
+                f"unsupported item {key!r}; supported: {list(RUNTIME_CONTEXT_ITEMS)}",
+            )
+        if key not in normalized:
+            normalized.append(key)
+    return normalized
 
 
 def build_snapshot(
@@ -24,6 +49,7 @@ def build_snapshot(
     prompt: dict[str, Any],
     tools: list[dict[str, Any]],
     policy: dict[str, Any],
+    runtime_context: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
@@ -32,6 +58,8 @@ def build_snapshot(
         "prompt": prompt,
         "tools": tools,
         "policy": policy,
+        # 只存"需要哪些事实"，不存事实本身：回放要复现行为，不是复现时空
+        "runtime_context": list(runtime_context or []),
     }
 
 
@@ -204,17 +232,21 @@ def diff_snapshots(
     model_target = _model_view(target)
     prompt_base = _prompt_view(base)
     prompt_target = _prompt_view(target)
+    context_base = [str(item) for item in base.get("runtime_context") or []]
+    context_target = [str(item) for item in target.get("runtime_context") or []]
     baseline = {
         "model": model_base,
         "prompt": prompt_base,
         "tools": sorted(base_tools),
         "policy": base_policy,
+        "runtime_context": context_base,
     }
     candidate = {
         "model": model_target,
         "prompt": prompt_target,
         "tools": sorted(target_tools),
         "policy": target_policy,
+        "runtime_context": context_target,
     }
     return {
         "identical": config_hash(baseline) == config_hash(candidate),
@@ -234,4 +266,9 @@ def diff_snapshots(
             "changed": changed,
         },
         "policy": policy_changes,
+        "runtime_context": {
+            "changed": context_base != context_target,
+            "base": context_base,
+            "target": context_target,
+        },
     }

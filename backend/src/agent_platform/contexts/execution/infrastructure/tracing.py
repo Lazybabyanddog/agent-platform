@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import logging
 import time
 import uuid
 from datetime import UTC, datetime
@@ -24,8 +23,9 @@ from agent_platform.contexts.execution.domain.ports import (
     ToolPort,
     ToolResult,
 )
+from agent_platform.shared.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 SUCCESS = "SUCCESS"
 FAILED = "FAILED"
@@ -33,6 +33,15 @@ FAILED = "FAILED"
 
 def _span_id() -> str:
     return uuid.uuid4().hex[:16]
+
+
+def _tool_payload(binding: Any) -> dict[str, Any]:
+    """工具卡摘要：保留模型实际看到的名称、描述与参数契约。"""
+    return {
+        "name": binding.code,
+        "description": binding.description,
+        "parameters": binding.input_schema,
+    }
 
 
 def _message_payload(message: ChatMessage) -> dict[str, Any]:
@@ -134,11 +143,23 @@ class TracingModelPort:
             error_message=error_message,
             started_at=started_at,
             ended_at=datetime.now(UTC),
+            tools=tuple(_tool_payload(item) for item in request.tools),
+        )
+        logger.info(
+            "llm.call",
+            model_id=str(self._model_id),
+            model_name=self._model_name,
+            tool_count=record.tool_count,
+            input_tokens=record.input_tokens,
+            output_tokens=record.output_tokens,
+            latency_ms=record.latency_ms,
+            status=status,
+            error_code=error_code,
         )
         try:
             await self._recorder.record_llm_call(record)
         except Exception:  # noqa: BLE001 - 轨迹是辅助能力
-            logger.warning("failed to record llm call", exc_info=True)
+            logger.warning("trace.llm_write_failed", exc_info=True)
 
 
 class TracingToolPort:
@@ -237,7 +258,7 @@ class TracingToolPort:
         try:
             await self._recorder.record_tool_call(record)
         except Exception:  # noqa: BLE001 - 轨迹是辅助能力
-            logger.warning("failed to record tool call", exc_info=True)
+            logger.warning("trace.tool_write_failed", exc_info=True)
 
 
 def tool_index(

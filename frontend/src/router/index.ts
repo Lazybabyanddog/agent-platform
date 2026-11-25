@@ -62,6 +62,12 @@ const router = createRouter({
       meta: { title: '模型配置', permission: 'model:read' },
     },
     {
+      path: '/secrets',
+      name: 'secrets',
+      component: () => import('@/views/SecretListView.vue'),
+      meta: { title: '凭据管理', permission: 'secret:manage' },
+    },
+    {
       path: '/releases',
       name: 'releases',
       component: () => import('@/views/ReleaseView.vue'),

@@ -43,6 +43,7 @@ class LLMCall(Base, IdMixin, CreatedAtMixin):
         Enum(CallStatus, native_enum=False, length=16), nullable=False
     )
     error_code: Mapped[str | None] = mapped_column(String(64))
+    tool_count: Mapped[int | None] = mapped_column(Integer)
     request_summary: Mapped[dict] = mapped_column(JSONB, nullable=False)
     response_summary: Mapped[dict] = mapped_column(JSONB, nullable=False)
     request_body: Mapped[dict | None] = mapped_column(JSONB)

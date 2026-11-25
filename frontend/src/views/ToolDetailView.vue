@@ -41,19 +41,40 @@ const selectedVersionId = ref('')
 const riskLevel = ref<RiskLevel>('READ_ONLY')
 const editorModel = ref<Record<string, unknown>>({})
 const editorErrors = ref<Record<string, string>>({})
+const editorWarnings = ref<Record<string, string>>({})
+const warningSummary = ref('')
 const savingVersion = ref(false)
 const togglingStatus = ref(false)
 const granting = ref(false)
 const callOverview = ref<InstanceType<typeof ToolCallOverview>>()
 
 const RISK_LEVELS: RiskLevel[] = ['READ_ONLY', 'WRITE', 'HIGH']
-const DEFAULT_SPEC = {
-  method: 'POST',
-  url: 'https://',
-  timeout_s: 15,
-  headers: {},
-  auth: { type: 'none' },
-  input_schema: { type: 'object', properties: {} },
+/** 首个版本的空白契约按接入类型给骨架，避免 MCP 工具开局带上 HTTP 的 method。 */
+const DEFAULT_SPECS: Record<string, Record<string, unknown>> = {
+  HTTP: {
+    method: 'POST',
+    url: 'https://',
+    timeout_s: 15,
+    headers: {},
+    auth: { type: 'none' },
+    input_schema: { type: 'object', properties: {} },
+  },
+  MCP: {
+    transport: 'streamable_http',
+    url: 'https://',
+    tool_name: '',
+    timeout_s: 15,
+    headers: {},
+    auth: { type: 'none' },
+    input_schema: { type: 'object', properties: {} },
+  },
+}
+
+function defaultSpec(type: string): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(DEFAULT_SPECS[type] ?? DEFAULT_SPECS.HTTP)) as Record<
+    string,
+    unknown
+  >
 }
 
 const canManage = computed(() => session.can('tool:manage'))
@@ -67,6 +88,17 @@ const dirty = computed(() => {
   if (!selectedVersion.value) return true
   if (riskLevel.value !== selectedVersion.value.risk_level) return true
   return JSON.stringify(editorModel.value) !== JSON.stringify(selectedVersion.value.spec)
+})
+
+/** 用途描述来源：版本内优先，其次工具级；两处都空时后端拒绝保存版本 */
+const versionDescription = computed(() =>
+  typeof editorModel.value.description === 'string' ? editorModel.value.description.trim() : '',
+)
+const toolDescription = computed(() => (tool.value?.description ?? '').trim())
+const descriptionSource = computed(() => {
+  if (versionDescription.value) return '版本内'
+  if (toolDescription.value) return '工具级'
+  return '缺失'
 })
 
 function riskType(risk: RiskLevel | null): 'success' | 'warning' | 'danger' | 'info' {
@@ -85,6 +117,8 @@ function selectVersion(version: ToolVersion): void {
   riskLevel.value = version.risk_level
   editorModel.value = JSON.parse(JSON.stringify(version.spec)) as Record<string, unknown>
   editorErrors.value = {}
+  editorWarnings.value = {}
+  warningSummary.value = ''
 }
 
 async function load(): Promise<void> {
@@ -105,7 +139,7 @@ async function load(): Promise<void> {
     if (preferred) {
       selectVersion(preferred)
     } else if (!selectedVersionId.value) {
-      editorModel.value = JSON.parse(JSON.stringify(DEFAULT_SPEC)) as Record<string, unknown>
+      editorModel.value = defaultSpec(toolData.type)
       riskLevel.value = 'READ_ONLY'
       selectedVersionId.value = ''
     }
@@ -117,9 +151,10 @@ async function load(): Promise<void> {
   }
 }
 
-const KNOWN_SPEC_FIELDS = new Set([
+/** 两种接入类型共有的契约字段。 */
+const SHARED_SPEC_FIELDS = [
   'spec',
-  'spec.method',
+  'spec.description',
   'spec.url',
   'spec.timeout_s',
   'spec.headers',
@@ -128,14 +163,30 @@ const KNOWN_SPEC_FIELDS = new Set([
   'spec.auth.name',
   'spec.input_schema',
   'spec.output_schema',
-])
+  'spec.model_schema',
+  'spec.returns',
+  'spec.returns.terminal_statuses',
+]
+
+/** 映射后端校验错误到具体控件：类型专属字段只在对应类型下算「已映射」。 */
+function knownSpecFields(type: string | undefined): Set<string> {
+  const fields = new Set(SHARED_SPEC_FIELDS)
+  if (type === 'MCP') {
+    fields.add('spec.transport')
+    fields.add('spec.tool_name')
+  } else {
+    fields.add('spec.method')
+  }
+  return fields
+}
 
 function applyDefinitionError(err: ApiError): void {
+  const known = knownSpecFields(tool.value?.type)
   const mapped: Record<string, string> = {}
   const unmapped: string[] = []
   for (const detail of err.details) {
     const field = detail.field ?? ''
-    if (KNOWN_SPEC_FIELDS.has(field)) {
+    if (known.has(field)) {
       mapped[field] = detail.reason ?? '不合法'
     } else {
       unmapped.push(`${field || 'spec'}: ${detail.reason ?? '不合法'}`)
@@ -146,10 +197,29 @@ function applyDefinitionError(err: ApiError): void {
   error.value = unmapped.length ? '工具定义存在未映射到具体控件的错误，请查看上方汇总' : null
 }
 
+/** 把后端 warnings 拆成「可回填到参数行」与「只能顶部汇总」两部分 */
+function applyWarnings(items: ToolVersion['warnings']): void {
+  const mapped: Record<string, string> = {}
+  const unmapped: string[] = []
+  for (const item of items ?? []) {
+    const field = typeof item.field === 'string' ? item.field : ''
+    const reason = typeof item.reason === 'string' ? item.reason : '需要补充声明'
+    if (field.startsWith('spec.input_schema.properties.')) {
+      mapped[field] = reason
+    } else {
+      unmapped.push(`${field || 'spec'}：${reason}`)
+    }
+  }
+  editorWarnings.value = mapped
+  warningSummary.value = unmapped.join('；')
+}
+
 async function saveVersion(): Promise<void> {
   const editor = editorRef.value
   if (!editor) return
   editorErrors.value = {}
+  editorWarnings.value = {}
+  warningSummary.value = ''
   const localErrors = editor.validate()
   if (Object.keys(localErrors).length) {
     editorErrors.value = localErrors
@@ -171,8 +241,14 @@ async function saveVersion(): Promise<void> {
     tool.value = await getTool(toolId.value)
     versions.value = await listToolVersions(toolId.value)
     selectVersion(created)
+    applyWarnings(created.warnings)
+    const warningCount = Object.keys(editorWarnings.value).length
     if (previousHash && created.config_hash === previousHash) {
       ElMessage.warning(`已保存为 v${created.version_no}，但与上一版本等价（config_hash 相同）`)
+    } else if (warningCount || warningSummary.value) {
+      ElMessage.warning(
+        `已保存为 v${created.version_no}，另有 ${warningCount + (warningSummary.value ? 1 : 0)} 项契约提示待处理`,
+      )
     } else {
       ElMessage.success(`已保存为 v${created.version_no}`)
     }
@@ -316,8 +392,22 @@ onMounted(load)
           <el-descriptions-item label="授权时间">
             {{ formatTime(grant?.granted_at ?? null) }}
           </el-descriptions-item>
-          <el-descriptions-item label="描述" :span="2">
-            {{ tool.description || '—' }}
+          <el-descriptions-item label="用途描述" :span="2">
+            <el-tag
+              size="small"
+              :type="descriptionSource === '缺失' ? 'danger' : 'info'"
+              effect="plain"
+              class="tag-inline"
+            >
+              {{ descriptionSource }}
+            </el-tag>
+            <span :class="{ muted: descriptionSource === '缺失' }">
+              {{
+                versionDescription ||
+                toolDescription ||
+                '工具级与版本内都没有描述，保存版本会被拒绝'
+              }}
+            </span>
           </el-descriptions-item>
           <el-descriptions-item label="更新时间">{{ formatTime(tool.updated_at) }}</el-descriptions-item>
           <el-descriptions-item label="授权人">
@@ -384,10 +474,26 @@ onMounted(load)
                   :closable="false"
                   class="alert"
                 />
+                <el-alert
+                  v-if="warningSummary"
+                  :title="`已保存，但这些提示没有对应的控件：${warningSummary}`"
+                  type="warning"
+                  show-icon
+                  @close="warningSummary = ''"
+                />
+                <el-alert
+                  v-if="Object.keys(editorWarnings).length"
+                  :title="`已保存，有 ${Object.keys(editorWarnings).length} 条参数提示（不阻塞保存），见下方各参数行`"
+                  type="warning"
+                  show-icon
+                  @close="editorWarnings = {}"
+                />
                 <ToolSpecEditor
                   ref="editorRef"
                   v-model="editorModel"
                   :errors="editorErrors"
+                  :warnings="editorWarnings"
+                  :tool-description="tool.description ?? ''"
                   :readonly="!canManage"
                   :type="tool.type"
                 />
@@ -519,5 +625,9 @@ onMounted(load)
 
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.tag-inline {
+  margin-right: 6px;
 }
 </style>

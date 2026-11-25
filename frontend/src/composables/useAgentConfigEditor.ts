@@ -1,6 +1,6 @@
 import { computed, onUnmounted, ref, type Ref } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { ApiError, describeError } from '@/api/client'
 import {
@@ -15,6 +15,13 @@ import {
   type Model,
   type PreviewRequest,
 } from '@/api/endpoints'
+import {
+  normalizeTemplate,
+  pickOverrides,
+  pruneToTemplate,
+  validateParamValues,
+  type ModelParamTemplate,
+} from '@/utils/modelParams'
 
 export interface PromptVersionOption {
   value: string
@@ -49,7 +56,14 @@ interface SnapshotShape {
   prompt?: { prompt_version_id?: string; variables?: PromptVariableView[] }
   tools?: { tool_version_id?: string }[]
   policy?: Record<string, unknown>
+  runtime_context?: string[]
 }
+
+/** 平台当前支持的运行时事实；顺序无关，提交前统一排序去重。 */
+export const RUNTIME_CONTEXT_OPTIONS = [
+  { value: 'now', label: '当前时间', hint: '服务端渲染时刻的时间戳与星期，按部署时区呈现' },
+  { value: 'timezone', label: '时区', hint: '部署环境时区名，用于换算与解释时间' },
+] as const
 
 function asNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
@@ -63,7 +77,10 @@ export function useAgentConfigEditor(agentId: Ref<string>) {
   const modelId = ref('')
   const promptVersionId = ref('')
   const toolVersionIds = ref<string[]>([])
-  const paramsText = ref('{}')
+  /** 只保存需要覆盖模型默认值的参数项；空对象表示全部继承。 */
+  const params = ref<Record<string, unknown>>({})
+  /** 要注入的运行时事实（now/timezone）；空数组表示不注入。 */
+  const runtimeContext = ref<string[]>([])
   const note = ref('')
   const maxSteps = ref(6)
   const timeoutS = ref(30)
@@ -92,12 +109,24 @@ export function useAgentConfigEditor(agentId: Ref<string>) {
     () => promptVariables.value[promptVersionId.value] ?? snapshotVariables.value,
   )
 
+  /** 当前模型声明的参数模板：决定可填哪些键、范围与默认值。 */
+  const activeParamTemplate = computed<ModelParamTemplate>(() => {
+    const model = models.value.find((item) => item.id === modelId.value)
+    return normalizeTemplate(model?.param_template as Record<string, unknown> | undefined)
+  })
+
+  /** 提交用的声明：排序去重，避免勾选顺序影响 config_hash 与脏检查。 */
+  function runtimeDeclaration(): string[] {
+    return [...new Set(runtimeContext.value)].filter(Boolean).sort()
+  }
+
   function serialize(): string {
     return JSON.stringify({
       modelId: modelId.value,
       promptVersionId: promptVersionId.value,
       toolVersionIds: [...toolVersionIds.value],
-      paramsText: paramsText.value,
+      params: params.value,
+      runtimeContext: runtimeDeclaration(),
       note: note.value,
       maxSteps: maxSteps.value,
       timeoutS: timeoutS.value,
@@ -127,7 +156,14 @@ export function useAgentConfigEditor(agentId: Ref<string>) {
     toolVersionIds.value = (snapshot.tools ?? [])
       .map((item) => item.tool_version_id)
       .filter((value): value is string => Boolean(value))
-    paramsText.value = JSON.stringify(snapshot.model?.params ?? {}, null, 2)
+    // 快照里是全量归一化结果；只回显偏离模板默认值的项，其余留空继承。
+    params.value = pickOverrides(
+      pruneToTemplate(snapshot.model?.params ?? {}, activeParamTemplate.value),
+      activeParamTemplate.value,
+    )
+    runtimeContext.value = Array.isArray(snapshot.runtime_context)
+      ? snapshot.runtime_context.filter((item): item is string => typeof item === 'string')
+      : []
     note.value = version.note ?? ''
     const policy = snapshot.policy ?? {}
     maxSteps.value = asNumber(policy.max_steps, 6)
@@ -142,19 +178,19 @@ export function useAgentConfigEditor(agentId: Ref<string>) {
     loadFromVersion(baseVersion.value)
   }
 
+  /** 保存/预览前按当前模型模板校验参数，并把问题按后端字段名抛出。 */
   function paramsObject(): Record<string, unknown> {
-    const text = paramsText.value.trim()
-    if (!text) return {}
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(text)
-    } catch {
-      throw new Error('模型参数必须是合法 JSON')
-    }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('模型参数必须是 JSON 对象')
-    }
-    return parsed as Record<string, unknown>
+    const problem = Object.entries(validateParamValues(activeParamTemplate.value, params.value))[0]
+    if (problem) throw new Error(problem[1])
+    return { ...params.value }
+  }
+
+  /** 切换模型后裁掉新模板未声明的键，避免提交必然失败的残留参数。 */
+  function applyModelTemplate(): void {
+    params.value = pickOverrides(
+      pruneToTemplate(params.value, activeParamTemplate.value),
+      activeParamTemplate.value,
+    )
   }
 
   function policyPayload(): Record<string, unknown> {
@@ -170,7 +206,7 @@ export function useAgentConfigEditor(agentId: Ref<string>) {
   /** 保存与预览共同的引用集合。 */
   function referencePayload(): Pick<
     AgentVersionCreateInput,
-    'model_id' | 'prompt_version_id' | 'tool_version_ids' | 'params' | 'policy'
+    'model_id' | 'prompt_version_id' | 'tool_version_ids' | 'params' | 'policy' | 'runtime_context'
   > {
     if (!modelId.value) throw new Error('请选择模型')
     if (!promptVersionId.value) throw new Error('请选择 Prompt 版本')
@@ -180,6 +216,7 @@ export function useAgentConfigEditor(agentId: Ref<string>) {
       tool_version_ids: [...toolVersionIds.value],
       params: paramsObject(),
       policy: policyPayload(),
+      runtime_context: runtimeDeclaration(),
     }
   }
 
@@ -207,12 +244,21 @@ export function useAgentConfigEditor(agentId: Ref<string>) {
   async function save(options: { ignoreBase?: boolean } = {}): Promise<AgentVersion> {
     saving.value = true
     conflict.value = null
+    const declared = runtimeDeclaration()
     try {
       const version = await createAgentVersion(
         agentId.value,
         toVersionPayload(options.ignoreBase ? null : baseVersionId.value),
       )
       loadFromVersion(version)
+      // 旧后端会静默忽略未知字段：把「声明没生效」变成可见提示，而不是下一轮执行才发现
+      const saved = ((version.snapshot ?? {}) as SnapshotShape).runtime_context ?? []
+      const normalized = [...new Set(saved)].sort()
+      if (JSON.stringify(normalized) !== JSON.stringify(declared)) {
+        ElMessage.warning(
+          `运行时上下文声明未生效（已保存版本为 ${normalized.join('、') || '空'}），请确认后端版本是否支持 runtime_context`,
+        )
+      }
       return version
     } catch (err) {
       if (err instanceof ApiError && err.code === 'AGENT_VERSION_CONFLICT') {
@@ -274,6 +320,11 @@ export function useAgentConfigEditor(agentId: Ref<string>) {
           active: tool.status === 'ACTIVE',
         })),
       )
+      // 版本可能先于模型列表加载：模板就绪后再补一次“继承默认值”的归一化。
+      if (initial.value && !dirty.value) {
+        params.value = pickOverrides(params.value, activeParamTemplate.value)
+        initial.value = serialize()
+      }
     } catch (err) {
       catalogError.value = describeError(err)
     } finally {
@@ -310,7 +361,9 @@ export function useAgentConfigEditor(agentId: Ref<string>) {
     modelId,
     promptVersionId,
     toolVersionIds,
-    paramsText,
+    params,
+    runtimeContext,
+    activeParamTemplate,
     note,
     maxSteps,
     timeoutS,
@@ -331,6 +384,7 @@ export function useAgentConfigEditor(agentId: Ref<string>) {
     catalogLoading,
     catalogError,
     loadFromVersion,
+    applyModelTemplate,
     reset,
     save,
     loadCatalog,

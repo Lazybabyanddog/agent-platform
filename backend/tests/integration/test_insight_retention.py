@@ -1,4 +1,4 @@
-"""正文留存开关、敏感字段掩码与正文读取权限。"""
+"""追踪正文落库、敏感字段掩码与正文读取权限。"""
 
 from __future__ import annotations
 
@@ -142,7 +142,7 @@ def _tool_entry(trace: dict) -> dict:
     return next(entry for entry in trace["entries"] if entry["type"] == "TOOL_CALL")
 
 
-async def test_default_only_stores_summary(
+async def test_tool_call_stores_masked_body_by_default(
     api_client,
     tenant_env: TenantEnv,
     admin_headers: dict[str, str],
@@ -152,46 +152,6 @@ async def test_default_only_stores_summary(
     agent = await _published_agent(api_client, admin_headers, tool)
     use_model(monkeypatch, ToolCallingModel(tool["tool_code"]))
     use_tool(monkeypatch, EchoTool())
-
-    invoked = await _invoke(api_client, admin_headers, agent["id"])
-    trace = await api_client.get(
-        f"/api/v1/runs/{invoked['run_id']}/trace", headers=admin_headers
-    )
-    assert trace.status_code == 200, trace.text
-    entry = _tool_entry(trace.json())
-    assert entry["content"] is None
-    assert entry["summary"]["keys"] == ["password", "text"]
-
-    async with session_scope(tenant_env.tenant_id) as session:
-        stored = (
-            await session.scalars(
-                select(ToolCallRow).where(ToolCallRow.tenant_id == tenant_env.tenant_id)
-            )
-        ).one()
-    assert stored.request_body is None
-    assert stored.response_body is None
-    assert stored.request_summary["keys"] == ["password", "text"]
-    assert "hi" not in json.dumps(stored.request_summary)
-
-
-async def test_retention_masks_sensitive_fields_and_hides_content_from_member(
-    api_client,
-    tenant_env: TenantEnv,
-    admin_headers: dict[str, str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tool = await _create_sensitive_tool(api_client, admin_headers)
-    agent = await _published_agent(api_client, admin_headers, tool)
-    use_model(monkeypatch, ToolCallingModel(tool["tool_code"]))
-    use_tool(monkeypatch, EchoTool())
-
-    enabled = await api_client.patch(
-        f"/api/v1/tenants/{tenant_env.tenant_id}/insight-retention",
-        headers=admin_headers,
-        json={"enabled": True},
-    )
-    assert enabled.status_code == 200, enabled.text
-    assert enabled.json()["content_retention_enabled"] is True
 
     invoked = await _invoke(api_client, admin_headers, agent["id"])
     trace = await api_client.get(
@@ -202,6 +162,7 @@ async def test_retention_masks_sensitive_fields_and_hides_content_from_member(
     assert entry["content"]["request"] == {"text": "hi", "password": "***"}
     assert entry["content"]["response"]["content"]["secret_token"] == "***"
     assert entry["content"]["response"]["content"]["echo"] == "hi"
+    assert entry["summary"]["keys"] == ["password", "text"]
 
     async with session_scope(tenant_env.tenant_id) as session:
         stored = (
@@ -211,6 +172,21 @@ async def test_retention_masks_sensitive_fields_and_hides_content_from_member(
         ).one()
     assert stored.request_body == {"text": "hi", "password": "***"}
     assert stored.response_body["content"]["secret_token"] == "***"
+    assert stored.request_summary["keys"] == ["password", "text"]
+    assert "hi" not in json.dumps(stored.request_summary)
+
+
+async def test_member_only_sees_summary(
+    api_client,
+    tenant_env: TenantEnv,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = await _create_sensitive_tool(api_client, admin_headers)
+    agent = await _published_agent(api_client, admin_headers, tool)
+    use_model(monkeypatch, ToolCallingModel(tool["tool_code"]))
+    use_tool(monkeypatch, EchoTool())
+    invoked = await _invoke(api_client, admin_headers, agent["id"])
 
     member_email = f"member-{suffix()}@example.com"
     member_password = "Passw0rd!456"
@@ -243,9 +219,10 @@ async def test_retention_masks_sensitive_fields_and_hides_content_from_member(
     assert member_entry["content"] is None
     assert member_entry["summary"]["keys"] == ["password", "text"]
 
-    forbidden = await api_client.patch(
+    # 留存开关端点已移除，旧路径不再存在
+    legacy = await api_client.patch(
         f"/api/v1/tenants/{tenant_env.tenant_id}/insight-retention",
-        headers=member_headers,
+        headers=admin_headers,
         json={"enabled": True},
     )
-    assert forbidden.status_code == 403, forbidden.text
+    assert legacy.status_code in (404, 405), legacy.text

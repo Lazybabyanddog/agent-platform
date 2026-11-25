@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -17,6 +18,7 @@ from agent_platform.contexts.agent.domain.snapshot import (
     SNAPSHOT_SCHEMA_VERSION,
     bindings_for_snapshot,
     build_snapshot,
+    normalize_runtime_context,
     diff_snapshots,
     normalize_policy,
 )
@@ -110,6 +112,7 @@ class AgentService:
         tool_version_ids: list[uuid.UUID] | None = None,
         params: dict[str, Any] | None = None,
         policy: dict[str, Any] | None = None,
+        runtime_context: list[str] | None = None,
     ) -> Agent:
         """创建逻辑身份；提供初始配置时在同一事务内生成版本 1。
 
@@ -147,6 +150,7 @@ class AgentService:
                     tool_version_ids=tool_version_ids or [],
                     params=params,
                     policy=policy,
+                    runtime_context=runtime_context,
                 )
                 if not assembled.available:
                     raise ResourceUnavailableError(
@@ -309,7 +313,11 @@ class AgentService:
             return agent
 
     async def delete(self, *, actor: ActorContext, agent_id: uuid.UUID) -> None:
-        """删除仅限从未产生版本、发布与运行记录的空壳，编码随之释放。"""
+        """软删除：读取路径全部消失、编码立即释放，版本与运行历史原样保留。
+
+        不物理删除是为了让历史会话、审计与运行记录仍能回溯到当时的 Agent；
+        调用侧由 `_resolve_release` 的 `AGENT_DELETED` 门禁明确拒绝。
+        """
         async with session_scope(actor.tenant_id) as session:
             agent = await self._load(session, tenant_id=actor.tenant_id, agent_id=agent_id)
             counts = {
@@ -323,18 +331,7 @@ class AgentService:
                     session, tenant_id=actor.tenant_id, agent_id=agent_id
                 ),
             }
-            if any(counts.values()):
-                raise ConflictError(
-                    "agent has history and cannot be deleted; archive it instead",
-                    code="AGENT_HAS_HISTORY",
-                    details=[
-                        {
-                            "field": "agent_id",
-                            "reason": "archive instead of delete",
-                            **{f"{key}_count": value for key, value in counts.items()},
-                        }
-                    ],
-                )
+            agent.deleted_at = datetime.now(UTC)
             await audit_service.record(
                 session,
                 tenant_id=actor.tenant_id,
@@ -342,9 +339,13 @@ class AgentService:
                 resource_type="agent",
                 resource_id=agent.id,
                 actor=actor,
-                detail={"code": agent.code, "status": agent.status.value},
+                detail={
+                    "code": agent.code,
+                    "status": agent.status.value,
+                    "soft": True,
+                    **{f"{key}_count": value for key, value in counts.items()},
+                },
             )
-            await session.delete(agent)
 
     async def list(self, *, actor: ActorContext) -> list[Agent]:
         async with session_scope(actor.tenant_id) as session:
@@ -582,6 +583,7 @@ class AgentService:
         tool_version_ids: list[uuid.UUID] | None = None,
         params: dict[str, Any] | None = None,
         policy: dict[str, Any] | None = None,
+        runtime_context: list[str] | None = None,
         note: str | None = None,
         base_version_id: uuid.UUID | None = None,
     ) -> AgentVersion:
@@ -603,6 +605,7 @@ class AgentService:
                 tool_version_ids=tool_version_ids or [],
                 params=params,
                 policy=policy,
+                runtime_context=runtime_context,
             )
             if not assembled.available:
                 raise ResourceUnavailableError(
@@ -656,6 +659,7 @@ class AgentService:
         tool_version_ids: list[uuid.UUID] | None = None,
         params: dict[str, Any] | None = None,
         policy: dict[str, Any] | None = None,
+        runtime_context: list[str] | None = None,
     ) -> AssembleResult:
         """解析引用并组装快照，不落库。
 
@@ -682,6 +686,7 @@ class AgentService:
             prompt=prompt_snapshot,
             tools=tool_snapshot,
             policy=normalized_policy,
+            runtime_context=normalize_runtime_context(runtime_context),
         )
         return AssembleResult(
             snapshot=snapshot,
@@ -875,6 +880,10 @@ class AgentService:
                     }
                 )
                 continue
+            spec = dict(version.spec or {})
+            if not str(spec.get("description") or "").strip():
+                # 历史版本没有版本级描述：用工具级描述补齐，使快照自解释、回放不依赖工具表
+                spec["description"] = (tool.description or "").strip()
             resolved.append(
                 {
                     "tool_id": str(tool.id),
@@ -882,7 +891,7 @@ class AgentService:
                     "tool_version_id": str(version.id),
                     "version_no": version.version_no,
                     "risk_level": version.risk_level.value,
-                    "spec": version.spec,
+                    "spec": spec,
                 }
             )
         return resolved, problems

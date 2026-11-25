@@ -56,6 +56,10 @@ class ToolResult:
     ok: bool
     content: str
     error_code: str | None = None
+    # 字段级失败原因（参数路径 + 原因），用于回灌让模型知道改哪里
+    details: tuple[dict[str, str], ...] = ()
+    # 是否允许模型修正后重试；默认不可恢复，避免新错误码被静默当成可重试
+    recoverable: bool = False
 
 
 class ModelPortError(Exception):
@@ -95,6 +99,8 @@ class LLMCallRecord:
     error_message: str | None
     started_at: datetime
     ended_at: datetime
+    # 本次调用实际携带的工具卡摘要：模型看到的描述与参数契约
+    tools: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

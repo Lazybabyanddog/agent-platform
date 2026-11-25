@@ -15,6 +15,10 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch):
         "JWT_SECRET",
         "SECRET_ENC_KEY",
         "LOG_JSON",
+        "LOG_LEVEL",
+        "LOG_DIR",
+        "LOG_MAX_BYTES",
+        "LOG_BACKUP_COUNT",
     ):
         monkeypatch.delenv(name, raising=False)
     reset_settings_cache()
@@ -40,6 +44,32 @@ def test_env_override(monkeypatch: pytest.MonkeyPatch):
     assert settings.database_url == "postgresql+asyncpg://u:p@db:5432/x"
     assert settings.sync_max_timeout_s == 42
     assert settings.log_json is False
+
+
+def test_log_dir_is_unset_by_default():
+    settings = Settings()
+
+    assert settings.log_dir is None
+    assert settings.log_max_bytes == 10 * 1024 * 1024
+    assert settings.log_backup_count == 5
+
+
+def test_blank_log_dir_is_unset(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LOG_DIR", "   ")
+
+    assert Settings().log_dir is None
+
+
+def test_log_dir_from_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LOG_DIR", "logs")
+    monkeypatch.setenv("LOG_MAX_BYTES", "1024")
+    monkeypatch.setenv("LOG_BACKUP_COUNT", "2")
+
+    settings = Settings()
+
+    assert settings.log_dir == "logs"
+    assert settings.log_max_bytes == 1024
+    assert settings.log_backup_count == 2
 
 
 def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch):

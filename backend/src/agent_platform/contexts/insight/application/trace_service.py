@@ -14,7 +14,6 @@ from agent_platform.contexts.insight.infrastructure.repositories import (
     LLMCallRepository,
     ToolCallRepository,
 )
-from agent_platform.contexts.platform.application.tenant_service import TenantService
 from agent_platform.shared.db import session_scope
 from agent_platform.shared.errors import NotFoundError
 
@@ -44,9 +43,6 @@ class TraceView:
 
 
 class TraceService:
-    def __init__(self) -> None:
-        self._tenant_service = TenantService()
-
     async def list_runs(
         self,
         *,
@@ -84,9 +80,7 @@ class TraceService:
                 session, tenant_id=tenant_id, run_id=run_id
             )
 
-        include_content = actor_can_read_content and await self._tenant_service.content_retention_enabled(
-            tenant_id
-        )
+        include_content = actor_can_read_content
 
         entries: list[TraceEntry] = [
             TraceEntry(
@@ -99,7 +93,11 @@ class TraceService:
                 started_at=call.started_at,
                 ended_at=call.ended_at,
                 latency_ms=call.latency_ms,
-                summary=dict(call.request_summary or {}),
+                summary={
+                    **dict(call.request_summary or {}),
+                    # 0 表示确实没带工具，None 表示该记录产生时尚未采集
+                    "tool_count": call.tool_count,
+                },
                 tokens={"input": call.input_tokens, "output": call.output_tokens},
                 content=(
                     {"request": call.request_body, "response": call.response_body}

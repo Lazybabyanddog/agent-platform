@@ -46,7 +46,43 @@ async def test_execution_session_unique_scope_and_indexes() -> None:
 
     assert "uq_execution_session_scope" in unique_names
     assert "ix_execution_session_tenant_agent_active" in indexes
+    assert "ix_execution_session_tenant_agent_owner_active" in indexes
     assert "ix_execution_session_expires_at" in indexes
+
+
+async def test_session_history_metadata_columns_default(
+    api_client, admin_headers, tenant_env
+) -> None:
+    agent = await create_agent(api_client, admin_headers)
+    async with system_session_scope() as session:
+        columns = {
+            row[0]
+            for row in (
+                await session.execute(
+                    text(
+                        "select column_name from information_schema.columns "
+                        "where table_schema = 'execution' and table_name = 'execution_session'"
+                    )
+                )
+            ).all()
+        }
+        assert {"title", "turn_count", "created_by"} <= columns
+        row = (
+            await session.execute(
+                text(
+                    "insert into execution.execution_session "
+                    "(id, tenant_id, agent_id, env, session_key, kind, preview_snapshot,"
+                    " status, last_active_at, expires_at) "
+                    "values (gen_random_uuid(), :tid, :aid, 'DEV', 'history-default', 'PREVIEW',"
+                    " '{\"schema\": 1}'::jsonb, 'IDLE', now(), now() + interval '1 day') "
+                    "returning title, turn_count, created_by"
+                ),
+                {"tid": str(tenant_env.tenant_id), "aid": agent["id"]},
+            )
+        ).one()
+    assert row[0] is None
+    assert row[1] == 0
+    assert row[2] is None
 
 
 async def test_execution_session_scope_is_unique_per_kind(

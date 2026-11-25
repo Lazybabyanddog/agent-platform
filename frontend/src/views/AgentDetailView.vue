@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -26,8 +26,9 @@ import {
   type PreviewRequest,
 } from '@/api/endpoints'
 import AgentPreviewPanel from '@/components/agent/AgentPreviewPanel.vue'
+import ModelParamsEditor from '@/components/agent/ModelParamsEditor.vue'
 import JsonBlock from '@/components/JsonBlock.vue'
-import { useAgentConfigEditor } from '@/composables/useAgentConfigEditor'
+import { RUNTIME_CONTEXT_OPTIONS, useAgentConfigEditor } from '@/composables/useAgentConfigEditor'
 import { useSessionStore } from '@/stores/session'
 
 interface SnapshotModel {
@@ -76,13 +77,28 @@ const router = useRouter()
 const agentId = computed(() => String(route.params.agentId ?? ''))
 const editor = useAgentConfigEditor(agentId)
 
+/** 清空声明会让模型失去平台时间/时区，属于会影响答非所问的破坏性编辑，先确认。 */
+async function onRuntimeContextChange(next: unknown): Promise<void> {
+  const values = Array.isArray(next) ? next.filter((item): item is string => typeof item === 'string') : []
+  if (!values.length && editor.runtimeContext.value.length) {
+    try {
+      await ElMessageBox.confirm(
+        '清空后模型看不到当前时间与时区，只能依据用户输入推断相对时间（如“明天”）。确定清空吗？',
+        '清空运行时上下文',
+        { type: 'warning', confirmButtonText: '清空', cancelButtonText: '保留' },
+      )
+    } catch {
+      return
+    }
+  }
+  editor.runtimeContext.value = values
+}
+
 const session = useSessionStore()
 const canManage = computed(() => session.can('agent:manage'))
-const canDelete = computed(
-  () => versions.value.length === 0 && releases.value.length === 0,
-)
 
 const lifecyclePending = ref<string | null>(null)
+const deleting = ref(false)
 
 const copyVisible = ref(false)
 const copyCode = ref('')
@@ -135,15 +151,27 @@ function archive(): void {
   })
 }
 
-function remove(): void {
-  void runLifecycle(
-    '删除',
-    async () => {
-      await deleteAgent(agentId.value)
-      await router.push('/agents')
-    },
-    { confirm: '删除仅适用于从未产生版本、发布与运行记录的 Agent，且不可恢复。确定删除吗？' },
-  )
+/** 软删除：删完页面就 404 了，所以不复用 runLifecycle 的"成功后再 load"。 */
+async function remove(): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      '删除为软删除：该 Agent 立即从列表消失，所有环境的新调用被拒绝（AGENT_DELETED）；版本、发布与运行历史保留，编码可重新使用。确定删除吗？',
+      '删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  deleting.value = true
+  try {
+    await deleteAgent(agentId.value)
+    ElMessage.success('已删除')
+    await router.push('/agents')
+  } catch (err) {
+    ElMessage.error(describeError(err))
+  } finally {
+    deleting.value = false
+  }
 }
 
 function openCopy(): void {
@@ -173,6 +201,9 @@ async function submitCopy(): Promise<void> {
 }
 
 function buildPreviewRequest(input: Record<string, unknown>, sessionId: string): PreviewRequest {
+  if (paramsEditorRef.value && !paramsEditorRef.value.commit()) {
+    throw new Error('模型参数未通过校验，请先修正 JSON 再预览')
+  }
   return editor.toPreviewPayload(input, {
     env: 'DEV',
     previewSessionId: sessionId,
@@ -185,6 +216,8 @@ const versions = ref<AgentVersion[]>([])
 const releases = ref<AgentRelease[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
+const versionsError = ref<string | null>(null)
+const releasesError = ref<string | null>(null)
 
 const selectedVersionId = ref('')
 const readiness = ref<AgentReadiness | null>(null)
@@ -228,6 +261,13 @@ function statusType(status: AgentStatus): 'success' | 'warning' | 'info' | 'dang
   return 'info'
 }
 
+function statusLabel(status: AgentStatus): string {
+  if (status === 'ACTIVE') return '启用中'
+  if (status === 'DRAFT') return '草稿'
+  if (status === 'ARCHIVED') return '已归档'
+  return '已停用'
+}
+
 function formatTime(value: string | null | undefined): string {
   return value ? new Date(value).toLocaleString() : '—'
 }
@@ -260,15 +300,27 @@ function policyValue(key: string): string {
 async function load(resetEditor = false): Promise<void> {
   loading.value = true
   error.value = null
-  try {
-    const [detail, versionList, releaseList] = await Promise.all([
-      getAgent(agentId.value),
-      listAgentVersions(agentId.value),
-      listReleases(agentId.value),
-    ])
-    agent.value = detail
+  versionsError.value = null
+  releasesError.value = null
+  const [detailResult, versionResult, releaseResult] = await Promise.allSettled([
+    getAgent(agentId.value),
+    listAgentVersions(agentId.value),
+    listReleases(agentId.value),
+  ])
+  if (detailResult.status === 'fulfilled') {
+    agent.value = detailResult.value
+  } else {
+    error.value = describeError(detailResult.reason)
+  }
+  if (releaseResult.status === 'fulfilled') {
+    releases.value = releaseResult.value
+  } else {
+    releases.value = []
+    releasesError.value = describeError(releaseResult.reason)
+  }
+  if (versionResult.status === 'fulfilled') {
+    const versionList = versionResult.value
     versions.value = versionList
-    releases.value = releaseList
     if (versionList.length) {
       const latest = [...versionList].sort((a, b) => b.version_no - a.version_no)[0]
       if (!versionList.some((item) => item.id === selectedVersionId.value)) {
@@ -278,25 +330,52 @@ async function load(resetEditor = false): Promise<void> {
         publishVersionId.value = latest.id
       }
       if (resetEditor) editor.loadFromVersion(latest)
-    } else if (resetEditor) {
-      editor.loadFromVersion(null)
+    } else {
+      publishVersionId.value = ''
+      if (resetEditor) editor.loadFromVersion(null)
     }
-  } catch (err) {
-    error.value = describeError(err)
-  } finally {
-    loading.value = false
+  } else {
+    versions.value = []
+    publishVersionId.value = ''
+    versionsError.value = describeError(versionResult.reason)
   }
+  loading.value = false
+}
+
+function focusConfigEditor(): void {
+  document
+    .getElementById('config-editor-card')
+    ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 const saveError = ref<string | null>(null)
+const paramErrors = ref<Record<string, string>>({})
+const paramsEditorRef = ref<InstanceType<typeof ModelParamsEditor> | null>(null)
 
 function useVersionAsBase(version: AgentVersion): void {
   editor.loadFromVersion(version)
   saveError.value = null
+  paramErrors.value = {}
 }
+
+function changeModel(): void {
+  editor.applyModelTemplate()
+  paramErrors.value = {}
+}
+
+// 用户一旦改动参数，上一轮后端返回的字段错误就不再适用。
+watch(
+  () => editor.params.value,
+  () => {
+    paramErrors.value = {}
+  },
+  { deep: true },
+)
 
 async function saveConfig(): Promise<void> {
   saveError.value = null
+  paramErrors.value = {}
+  if (paramsEditorRef.value && !paramsEditorRef.value.commit()) return
   try {
     const version = await editor.save()
     selectedVersionId.value = version.id
@@ -306,6 +385,13 @@ async function saveConfig(): Promise<void> {
     if (err instanceof ApiError && err.code === 'AGENT_VERSION_CONFLICT' && editor.conflict.value) {
       await resolveConflict()
       return
+    }
+    if (err instanceof ApiError) {
+      paramErrors.value = Object.fromEntries(
+        err.details
+          .filter((item) => item.field?.startsWith('params.') && item.reason)
+          .map((item) => [item.field as string, item.reason as string]),
+      )
     }
     saveError.value = describeError(err)
   }
@@ -362,6 +448,15 @@ function openPublish(version: AgentVersion): void {
 
 async function publish(): Promise<void> {
   publishError.value = null
+  if (versionsError.value) {
+    publishError.value = `版本列表加载失败：${versionsError.value}`
+    return
+  }
+  if (!versions.value.length) {
+    publishError.value =
+      '该 Agent 还没有任何版本，请先在「配置编辑」中选择模型与 Prompt 版本并保存，生成 v1 后再发布'
+    return
+  }
   if (!publishVersionId.value) {
     publishError.value = '请选择要发布的版本'
     return
@@ -413,7 +508,7 @@ onMounted(() => {
           Agent 详情
           <span v-if="agent" class="agent-chip">{{ agent.code }} · {{ agent.name }}</span>
           <el-tag v-if="agent" :type="statusType(agent.status)" size="small" class="status">
-            {{ agent.status }}
+            {{ statusLabel(agent.status) }}
           </el-tag>
         </h2>
       </div>
@@ -449,10 +544,9 @@ onMounted(() => {
             归档
           </el-button>
           <el-button
-            v-if="agent.status !== 'ARCHIVED' && canDelete"
             type="danger"
             plain
-            :loading="lifecyclePending === '删除'"
+            :loading="deleting"
             @click="remove"
           >
             删除
@@ -659,7 +753,7 @@ onMounted(() => {
         </template>
       </el-card>
 
-      <el-card shadow="never" class="panel">
+      <el-card id="config-editor-card" shadow="never" class="panel">
         <template #header>
           <div class="panel-head">
             <div class="editor-title">
@@ -730,6 +824,7 @@ onMounted(() => {
                   placeholder="选择模型"
                   filterable
                   class="full"
+                  @change="changeModel"
                 >
                   <el-option
                     v-for="model in editor.models.value"
@@ -785,12 +880,11 @@ onMounted(() => {
           </el-form-item>
 
           <el-form-item label="模型参数">
-            <el-input
-              v-model="editor.paramsText.value"
-              type="textarea"
-              :rows="4"
-              placeholder='{ "temperature": 0.3 }'
-              class="mono"
+            <ModelParamsEditor
+              ref="paramsEditorRef"
+              v-model="editor.params.value"
+              :template="editor.activeParamTemplate.value"
+              :errors="paramErrors"
             />
           </el-form-item>
 
@@ -838,6 +932,27 @@ onMounted(() => {
             </el-col>
           </el-row>
 
+          <el-form-item label="运行时上下文">
+            <div class="runtime-context">
+              <el-checkbox-group
+                :model-value="editor.runtimeContext.value"
+                @change="onRuntimeContextChange"
+              >
+                <el-checkbox
+                  v-for="item in RUNTIME_CONTEXT_OPTIONS"
+                  :key="item.value"
+                  :value="item.value"
+                  :title="item.hint"
+                >
+                  {{ item.label }}
+                </el-checkbox>
+              </el-checkbox-group>
+              <p class="hint">
+                注入为系统消息之后的独立消息：不写入会话历史、不占历史预算，每轮按当时时间重新生成。清空后模型只能依据用户输入推断相对时间。
+              </p>
+            </div>
+          </el-form-item>
+
           <el-form-item label="备注">
             <el-input v-model="editor.note.value" placeholder="本次变更说明（可选）" />
           </el-form-item>
@@ -879,7 +994,19 @@ onMounted(() => {
                 </template>
               </el-table-column>
             </el-table>
-            <p v-if="!sortedVersions.length" class="page-hint">该 Agent 还没有版本。</p>
+            <el-alert
+              v-if="versionsError"
+              :title="`版本列表加载失败：${versionsError}`"
+              type="error"
+              show-icon
+              :closable="false"
+              class="publish-error"
+            >
+              <el-button size="small" @click="load()">重试</el-button>
+            </el-alert>
+            <p v-else-if="!sortedVersions.length" class="page-hint">
+              该 Agent 还没有版本，先在「配置编辑」中保存一次生成 v1。
+            </p>
           </el-card>
         </el-col>
 
@@ -896,6 +1023,32 @@ onMounted(() => {
               :closable="false"
               class="publish-error"
             />
+            <el-alert
+              v-else-if="versionsError"
+              :title="`版本列表加载失败：${versionsError}`"
+              type="error"
+              show-icon
+              :closable="false"
+              class="publish-error"
+            >
+              <el-button size="small" @click="load()">重试</el-button>
+            </el-alert>
+            <el-alert
+              v-else-if="!versions.length"
+              title="该 Agent 还没有任何版本，保存一次配置后即可发布。"
+              type="info"
+              show-icon
+              :closable="false"
+              class="publish-error"
+            >
+              <el-button
+                v-if="canManage && agent.status !== 'ARCHIVED'"
+                size="small"
+                @click="focusConfigEditor"
+              >
+                去配置区保存
+              </el-button>
+            </el-alert>
             <el-form label-width="72px" label-position="left">
               <el-form-item label="环境">
                 <el-select v-model="publishEnv" class="full">
@@ -903,7 +1056,12 @@ onMounted(() => {
                 </el-select>
               </el-form-item>
               <el-form-item label="版本">
-                <el-select v-model="publishVersionId" placeholder="选择版本" class="full">
+                <el-select
+                  v-model="publishVersionId"
+                  placeholder="选择版本"
+                  class="full"
+                  :no-data-text="versionsError ? '版本列表加载失败' : '暂无版本，请先保存一次配置'"
+                >
                   <el-option
                     v-for="item in sortedVersions"
                     :key="item.id"
@@ -919,7 +1077,7 @@ onMounted(() => {
                 <el-button
                   type="primary"
                   :loading="publishing"
-                  :disabled="!canManage || agent.status === 'ARCHIVED'"
+                  :disabled="!canManage || agent.status === 'ARCHIVED' || !versions.length"
                   @click="publish"
                 >
                   体检并发布
@@ -928,6 +1086,16 @@ onMounted(() => {
             </el-form>
 
             <div class="config-sub">发布记录</div>
+            <el-alert
+              v-if="releasesError"
+              :title="`发布记录加载失败：${releasesError}`"
+              type="error"
+              show-icon
+              :closable="false"
+              class="publish-error"
+            >
+              <el-button size="small" @click="load()">重试</el-button>
+            </el-alert>
             <el-table :data="releases" size="small" row-key="release_id">
               <el-table-column prop="env" label="环境" width="70" />
               <el-table-column label="版本" width="80">
@@ -939,7 +1107,7 @@ onMounted(() => {
                 <template #default="{ row }">{{ formatTime(row.released_at) }}</template>
               </el-table-column>
             </el-table>
-            <p v-if="!releases.length" class="page-hint">还没有发布记录。</p>
+            <p v-if="!releasesError && !releases.length" class="page-hint">还没有发布记录。</p>
           </el-card>
         </el-col>
       </el-row>
@@ -1165,6 +1333,18 @@ onMounted(() => {
 
 .full {
   width: 100%;
+}
+
+.runtime-context {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.runtime-context .hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 .editor-title {

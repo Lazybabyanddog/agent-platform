@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, or_, select, update
@@ -102,6 +102,24 @@ class RunRepository:
         )
         return list(rows), total
 
+    async def list_for_session(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: uuid.UUID,
+        execution_session_id: uuid.UUID,
+    ) -> list[Run]:
+        """会话内的运行，按开始时间升序：历史轮次依此对齐。"""
+        rows = await session.scalars(
+            select(Run)
+            .where(
+                Run.tenant_id == tenant_id,
+                Run.execution_session_id == execution_session_id,
+            )
+            .order_by(Run.started_at, Run.id)
+        )
+        return list(rows)
+
     async def finish(
         self,
         session: AsyncSession,
@@ -169,6 +187,8 @@ class ExecutionSessionRepository:
         agent_release_id: uuid.UUID | None = None,
         agent_version_id: uuid.UUID | None = None,
         preview_snapshot: dict[str, Any] | None = None,
+        created_by: uuid.UUID | None = None,
+        title: str | None = None,
     ) -> ExecutionSession:
         row = ExecutionSession(
             tenant_id=tenant_id,
@@ -179,6 +199,9 @@ class ExecutionSessionRepository:
             agent_release_id=agent_release_id,
             agent_version_id=agent_version_id,
             preview_snapshot=preview_snapshot,
+            created_by=created_by,
+            title=title,
+            turn_count=0,
             status=SessionStatus.IDLE,
             last_active_at=datetime.now(tz=expires_at.tzinfo),
             expires_at=expires_at,
@@ -239,6 +262,35 @@ class ExecutionSessionRepository:
         )
         await session.execute(statement)
 
+    async def record_turn(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: uuid.UUID,
+        session_id: uuid.UUID,
+        title: str | None = None,
+        now: datetime,
+    ) -> None:
+        """一轮成功受理后累加轮数，首轮同时写入标题（仅在标题为空时）。"""
+        values: dict[str, Any] = {
+            "turn_count": ExecutionSession.turn_count + 1,
+            "last_active_at": now,
+        }
+        statement = (
+            update(ExecutionSession)
+            .where(
+                ExecutionSession.tenant_id == tenant_id,
+                ExecutionSession.id == session_id,
+            )
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        if title:
+            statement = statement.values(
+                title=func.coalesce(ExecutionSession.title, title)
+            )
+        await session.execute(statement)
+
     async def delete(
         self, session: AsyncSession, row: ExecutionSession
     ) -> None:
@@ -252,8 +304,12 @@ class ExecutionSessionRepository:
         tenant_id: uuid.UUID,
         agent_id: uuid.UUID,
         kind: RunKind | None = None,
+        env: Environment | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
+        owner_id: uuid.UUID | None = None,
+        include_expired: bool = True,
+        now: datetime | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[tuple[ExecutionSession, int | None]], int]:
@@ -263,10 +319,22 @@ class ExecutionSessionRepository:
         ]
         if kind is not None:
             conditions.append(ExecutionSession.kind == kind)
+        if env is not None:
+            conditions.append(ExecutionSession.env == env)
         if start is not None:
             conditions.append(ExecutionSession.last_active_at >= start)
         if end is not None:
             conditions.append(ExecutionSession.last_active_at < end)
+        if owner_id is not None:
+            # 本人会话 + 未记录归属的存量会话；其他成员的会话不可见
+            conditions.append(
+                or_(
+                    ExecutionSession.created_by == owner_id,
+                    ExecutionSession.created_by.is_(None),
+                )
+            )
+        if not include_expired:
+            conditions.append(ExecutionSession.expires_at > (now or datetime.now(UTC)))
 
         total = int(
             await session.scalar(

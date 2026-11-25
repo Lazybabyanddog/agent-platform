@@ -21,6 +21,7 @@ from agent_platform.contexts.catalog.infrastructure.repositories import (
     PromptVersionRepository,
 )
 from agent_platform.contexts.catalog.infrastructure.tables import Prompt, PromptVersion
+from agent_platform.contexts.platform.application.audit_service import audit_service
 from agent_platform.shared.context import ActorContext
 from agent_platform.shared.db import session_scope
 from agent_platform.shared.errors import ConflictError, NotFoundError
@@ -87,6 +88,41 @@ class PromptService:
             if prompt is None:
                 raise NotFoundError("prompt not found")
             return prompt
+
+    async def delete(self, *, actor: ActorContext, prompt_id: uuid.UUID) -> None:
+        """删除 Prompt 与其全部版本；已被 Agent 版本引用时拒绝，先解引用再删。"""
+        async with session_scope(actor.tenant_id) as session:
+            repo = PromptRepository()
+            prompt = await repo.by_id(
+                session, tenant_id=actor.tenant_id, prompt_id=prompt_id
+            )
+            if prompt is None:
+                raise NotFoundError("prompt not found")
+            references = await repo.count_agent_version_references(
+                session, tenant_id=actor.tenant_id, prompt_id=prompt_id
+            )
+            if references:
+                raise ConflictError(
+                    "prompt is still referenced by agent versions",
+                    code="PROMPT_IN_USE",
+                    details=[
+                        {
+                            "field": "prompt_id",
+                            "reason": "detach the prompt from agent versions first",
+                            "agent_version_count": references,
+                        }
+                    ],
+                )
+            await audit_service.record(
+                session,
+                tenant_id=actor.tenant_id,
+                action="prompt.deleted",
+                resource_type="prompt",
+                resource_id=prompt.id,
+                actor=actor,
+                detail={"code": prompt.code, "name": prompt.name},
+            )
+            await repo.delete(session, prompt=prompt)
 
     async def add_version(
         self,

@@ -25,7 +25,7 @@ from agent_platform.contexts.catalog.domain.errors import (
     ToolOutputInvalidError,
     ToolTimeoutError,
 )
-from agent_platform.contexts.catalog.domain.tool import validate_spec
+from agent_platform.contexts.catalog.domain.tool import schema_warnings, validate_spec
 from agent_platform.contexts.catalog.infrastructure.mcp_client import McpSession, SdkMcpSession
 from agent_platform.contexts.catalog.infrastructure.repositories import (
     ToolGrantRepository,
@@ -62,10 +62,38 @@ class ToolView:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolVersionSaveResult:
+    """保存版本的结果：版本本身 + 不阻塞保存的契约提示。"""
+
+    version: ToolVersion
+    warnings: list[dict[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
 class ToolGrantView:
     granted: bool
     granted_at: datetime | None
     granted_by: uuid.UUID | None
+
+
+def _with_model_description(
+    spec: dict[str, Any], tool_description: str | None
+) -> dict[str, Any]:
+    """把面向模型的用途描述固化进版本契约。
+
+    描述属于语义，语义随参数变化，因此以版本为准；
+    版本未写时继承工具级描述，两者都空则拒绝保存——
+    模型拿不到用途描述时只会滥用工具。
+    """
+    description = (spec.get("description") or "").strip()
+    if not description:
+        description = (tool_description or "").strip()
+    if not description:
+        raise ValidationFailedError.for_field(
+            "spec.description",
+            "a model-facing description is required on the version or the tool",
+        )
+    return {**spec, "description": description}
 
 
 def _to_view(tool: Tool, version: ToolVersion | None, *, granted: bool) -> ToolView:
@@ -91,6 +119,27 @@ class ToolCallResult:
     request_digest: str
     response_digest: str | None
     error_code: str | None = None
+
+
+async def build_auth_headers(*, tenant_id: uuid.UUID, spec: dict[str, Any]) -> dict[str, str]:
+    """静态请求头 + 按 auth 声明解析密钥。
+
+    执行与探测共用同一条路径：否则很容易出现「探测按 Bearer 拼、调用按 header 拼」
+    这类错位，表现为探测 401、真正调用正常（或反过来）。
+    """
+    headers = dict(spec.get("headers") or {})
+    auth = spec.get("auth") or {"type": "none"}
+    if auth.get("type") == "bearer":
+        secret = await secret_service.resolve(
+            tenant_id=tenant_id, secret_id=uuid.UUID(str(auth["secret_ref_id"]))
+        )
+        headers["Authorization"] = f"Bearer {secret}"
+    elif auth.get("type") == "header":
+        secret = await secret_service.resolve(
+            tenant_id=tenant_id, secret_id=uuid.UUID(str(auth["secret_ref_id"]))
+        )
+        headers[str(auth["name"])] = secret
+    return headers
 
 
 class ToolService:
@@ -221,7 +270,7 @@ class ToolService:
         tool_id: uuid.UUID,
         spec: dict[str, Any],
         risk_level: RiskLevel,
-    ) -> ToolVersion:
+    ) -> ToolVersionSaveResult:
         async with session_scope(actor.tenant_id) as session:
             tool = await ToolRepository().by_id(
                 session, tenant_id=actor.tenant_id, tool_id=tool_id
@@ -230,11 +279,13 @@ class ToolService:
                 raise NotFoundError("tool not found")
             # 版本必须与工具既有接入类型保持一致，避免同一工具出现两套契约
             normalized = validate_spec(spec, tool.type)
+            normalized = _with_model_description(normalized, tool.description)
+            warnings = schema_warnings(normalized)
             repo = ToolVersionRepository()
             version_no = await repo.next_version_no(session, tool_id=tool_id)
             try:
                 async with session.begin_nested():
-                    return await repo.create(
+                    version = await repo.create(
                         session,
                         tenant_id=actor.tenant_id,
                         tool_id=tool_id,
@@ -247,6 +298,7 @@ class ToolService:
                     )
             except IntegrityError as exc:
                 raise ConflictError("tool version conflict, retry the request") from exc
+            return ToolVersionSaveResult(version=version, warnings=warnings)
 
     # ---------------------------------------------------------- 授权
 
@@ -318,31 +370,13 @@ class ToolService:
             )
 
         _validate_arguments(arguments, spec)
-        headers = await self._build_headers(actor=actor, spec=spec)
+        headers = await build_auth_headers(tenant_id=actor.tenant_id, spec=spec)
 
         if tool_type == ToolType.MCP:
             return await self._execute_mcp(
                 actor=actor, spec=spec, arguments=arguments, headers=headers
             )
         return await self._execute_http(spec=spec, arguments=arguments, headers=headers)
-
-    async def _build_headers(
-        self, *, actor: ActorContext, spec: dict[str, Any]
-    ) -> dict[str, str]:
-        """静态请求头 + 按 auth 声明解析密钥；HTTP 与 MCP 共用。"""
-        headers = dict(spec.get("headers") or {})
-        auth = spec.get("auth") or {"type": "none"}
-        if auth.get("type") == "bearer":
-            secret = await secret_service.resolve(
-                tenant_id=actor.tenant_id, secret_id=uuid.UUID(str(auth["secret_ref_id"]))
-            )
-            headers["Authorization"] = f"Bearer {secret}"
-        elif auth.get("type") == "header":
-            secret = await secret_service.resolve(
-                tenant_id=actor.tenant_id, secret_id=uuid.UUID(str(auth["secret_ref_id"]))
-            )
-            headers[str(auth["name"])] = secret
-        return headers
 
     async def _execute_http(
         self,

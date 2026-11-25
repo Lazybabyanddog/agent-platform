@@ -42,6 +42,14 @@ class ExecutionSession(Base, IdMixin, TimestampMixin):
         Index(
             "ix_execution_session_tenant_agent_active", "tenant_id", "agent_id", "last_active_at"
         ),
+        Index(
+            "ix_execution_session_tenant_agent_owner_active",
+            "tenant_id",
+            "agent_id",
+            "kind",
+            "created_by",
+            "last_active_at",
+        ),
         Index("ix_execution_session_expires_at", "expires_at"),
         CheckConstraint(
             "(kind = 'INVOKE' AND agent_release_id IS NOT NULL AND agent_version_id IS NOT NULL"
@@ -71,6 +79,15 @@ class ExecutionSession(Base, IdMixin, TimestampMixin):
         Uuid(as_uuid=True), ForeignKey("agent.agent_version.id", ondelete="RESTRICT")
     )
     preview_snapshot: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    title: Mapped[str | None] = mapped_column(
+        String(120), comment="首轮输入的截断摘要；正文留存关闭时留空"
+    )
+    turn_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0", comment="已产生运行的轮数"
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), comment="发起会话的用户或 API Key 标识；存量行为空"
+    )
     status: Mapped[SessionStatus] = mapped_column(
         Enum(SessionStatus, native_enum=False, length=16),
         nullable=False,

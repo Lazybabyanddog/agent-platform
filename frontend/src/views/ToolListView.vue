@@ -10,6 +10,7 @@ import {
   updateToolStatus,
   type RiskLevel,
   type Tool,
+  type ToolType,
 } from '@/api/endpoints'
 import ToolSpecEditor from '@/components/tool/ToolSpecEditor.vue'
 import { useSessionStore } from '@/stores/session'
@@ -32,21 +33,40 @@ const formRef = ref<FormInstance>()
 const specEditor = ref<InstanceType<typeof ToolSpecEditor>>()
 
 const RISK_LEVELS: RiskLevel[] = ['READ_ONLY', 'WRITE', 'HIGH']
-const DEFAULT_SPEC = {
-  method: 'POST',
-  url: 'https://',
-  timeout_s: 15,
-  headers: {},
-  auth: { type: 'none' },
-  input_schema: { type: 'object', properties: {} },
+const TYPE_OPTIONS: ToolType[] = ['HTTP', 'MCP']
+
+/** 每种接入类型的契约骨架。切换类型时整体替换，避免把上一个类型的字段带过去。 */
+const DEFAULT_SPECS: Record<ToolType, Record<string, unknown>> = {
+  HTTP: {
+    method: 'POST',
+    url: 'https://',
+    timeout_s: 15,
+    headers: {},
+    auth: { type: 'none' },
+    input_schema: { type: 'object', properties: {} },
+  },
+  MCP: {
+    transport: 'streamable_http',
+    url: 'https://',
+    tool_name: '',
+    timeout_s: 15,
+    headers: {},
+    auth: { type: 'none' },
+    input_schema: { type: 'object', properties: {} },
+  },
+}
+
+function blankSpec(type: ToolType): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(DEFAULT_SPECS[type])) as Record<string, unknown>
 }
 
 const form = ref({
   code: '',
   name: '',
   description: '',
+  type: 'HTTP' as ToolType,
   risk_level: 'READ_ONLY' as RiskLevel,
-  spec: { ...DEFAULT_SPEC } as Record<string, unknown>,
+  spec: blankSpec('HTTP'),
 })
 
 const canManage = computed(() => session.can('tool:manage'))
@@ -59,16 +79,22 @@ const filtered = computed(() => {
   )
 })
 
+/**
+ * 编码与名称只在点「创建」时校验：`trigger: []` 让 blur/change 事件不触发校验
+ * （不写 trigger 反而会被每次 blur 触发），`formRef.validate()` 仍会覆盖这些规则。
+ *
+ * 探测远端工具发生在选定编码、名称之前，输入过程中的即时红字只会打断探测与试填。
+ */
 const rules: FormRules = {
   code: [
-    { required: true, message: '请输入编码', trigger: 'blur' },
+    { required: true, message: '请输入编码', trigger: [] },
     {
       pattern: /^[A-Za-z0-9_.-]{1,64}$/,
       message: '1~64 位，仅允许字母、数字与 _ . -',
-      trigger: 'blur',
+      trigger: [],
     },
   ],
-  name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
+  name: [{ required: true, message: '请输入名称', trigger: [] }],
 }
 
 function riskType(risk: RiskLevel | null): 'success' | 'warning' | 'danger' | 'info' {
@@ -115,13 +141,28 @@ function openCreate(): void {
     code: '',
     name: '',
     description: '',
+    type: 'HTTP',
     risk_level: 'READ_ONLY',
-    spec: JSON.parse(JSON.stringify(DEFAULT_SPEC)) as Record<string, unknown>,
+    spec: blankSpec('HTTP'),
   }
   codeError.value = ''
   createError.value = null
   fieldErrors.value = {}
   dialogVisible.value = true
+}
+
+function switchType(value: ToolType): void {
+  // 后端对 MCP 契约是 {**spec} 合并，会原样保留未知键：
+  // 若把带 method 的 HTTP 骨架交给 MCP，脏字段会静默进入不可变版本，之后删不掉
+  form.value.spec = blankSpec(value)
+  fieldErrors.value = {}
+}
+
+/** 选中远端工具后，用它的描述补工具级描述；不覆盖用户已写的内容。 */
+function onRemoteTool(tool: { name: string; description: string | null }): void {
+  if (!tool.description) return
+  if (form.value.description.trim()) return
+  form.value.description = tool.description
 }
 
 async function submit(): Promise<void> {
@@ -146,7 +187,7 @@ async function submit(): Promise<void> {
       code: form.value.code.trim(),
       name: form.value.name.trim(),
       description: form.value.description.trim() || null,
-      type: 'HTTP',
+      type: form.value.type,
       risk_level: form.value.risk_level,
       spec: specEditor.value.getSpec(),
     })
@@ -190,7 +231,7 @@ onMounted(load)
     <div class="page-head">
       <div>
         <h2 class="page-title">工具管理</h2>
-        <p class="page-hint">注册 HTTP 工具契约、维护版本、授权并验证调用。</p>
+        <p class="page-hint">注册 HTTP / MCP 工具契约、维护版本、授权并验证调用。</p>
       </div>
       <div class="actions">
         <el-input
@@ -275,7 +316,7 @@ onMounted(load)
       </el-button>
     </el-empty>
 
-    <el-dialog v-model="dialogVisible" title="新建工具" width="720px" top="6vh">
+    <el-dialog v-model="dialogVisible" title="新建工具" width="820px" top="6vh">
       <el-alert
         v-if="createError"
         :title="createError"
@@ -310,6 +351,16 @@ onMounted(load)
             placeholder="可选"
           />
         </el-form-item>
+        <el-form-item label="接入类型" prop="type">
+          <el-radio-group v-model="form.type" @change="switchType">
+            <el-radio-button v-for="item in TYPE_OPTIONS" :key="item" :value="item">
+              {{ item }}
+            </el-radio-button>
+          </el-radio-group>
+          <span class="risk-hint">
+            MCP 走远程 streamable_http，平台不托管本地进程（不支持 stdio）
+          </span>
+        </el-form-item>
         <el-form-item label="风险等级" prop="risk_level">
           <el-select v-model="form.risk_level" class="risk-select">
             <el-option v-for="level in RISK_LEVELS" :key="level" :label="level" :value="level" />
@@ -322,7 +373,9 @@ onMounted(load)
       <ToolSpecEditor
         ref="specEditor"
         v-model="form.spec"
+        :type="form.type"
         :errors="fieldErrors"
+        @remote-tool="onRemoteTool"
       />
 
       <template #footer>

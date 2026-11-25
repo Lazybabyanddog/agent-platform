@@ -7,6 +7,9 @@ import uuid
 from fastapi import APIRouter, Query, status
 
 from agent_platform.contexts.catalog.api.schemas import (
+    McpProbeRequest,
+    McpProbeResponse,
+    McpProbeToolResponse,
     ModelCreateRequest,
     ModelResponse,
     ModelStatusRequest,
@@ -35,6 +38,7 @@ from agent_platform.contexts.catalog.api.schemas import (
     ToolVersionCreateRequest,
     ToolVersionResponse,
 )
+from agent_platform.contexts.catalog.application.mcp_probe_service import mcp_probe_service
 from agent_platform.contexts.catalog.application.model_service import ProbeResult, model_service
 from agent_platform.contexts.catalog.application.prompt_service import prompt_service
 from agent_platform.contexts.catalog.application.tool_service import tool_service
@@ -288,6 +292,20 @@ async def get_prompt(prompt_id: uuid.UUID, actor: CurrentActor) -> PromptRespons
     return PromptResponse.model_validate(await prompt_service.get(actor=actor, prompt_id=prompt_id))
 
 
+@router.delete(
+    "/prompts/{prompt_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["prompts"],
+    description=(
+        "删除 Prompt 及其全部版本，编码随之释放；"
+        "仍被 Agent 版本引用时返回 409 `PROMPT_IN_USE`，需先解除引用。"
+    ),
+)
+async def delete_prompt(prompt_id: uuid.UUID, actor: CurrentActor) -> None:
+    await authorization.require_permission(actor, Permission.PROMPT_MANAGE)
+    await prompt_service.delete(actor=actor, prompt_id=prompt_id)
+
+
 @router.post(
     "/prompts/{prompt_id}/versions",
     response_model=PromptVersionResponse,
@@ -385,6 +403,28 @@ async def list_tools(actor: CurrentActor) -> list[ToolResponse]:
     return [ToolResponse.model_validate(t) for t in tools]
 
 
+@router.post("/tools/probe-mcp", response_model=McpProbeResponse, tags=["tools"])
+async def probe_mcp_tool(payload: McpProbeRequest, actor: CurrentActor) -> McpProbeResponse:
+    """连远端取工具清单，供注册前填充契约。
+
+    与创建工具同权（`TOOL_MANAGE`）：探测会让服务端主动连接给定地址，
+    不具备工具管理权的人不应拥有这个能力。探测不落库，不产生工具或版本。
+    """
+    await authorization.require_permission(actor, Permission.TOOL_MANAGE)
+    result = await mcp_probe_service.probe(actor=actor, spec=payload.model_dump())
+    return McpProbeResponse(
+        verdict=result.verdict,
+        tools=[
+            McpProbeToolResponse(
+                name=tool.name, description=tool.description, input_schema=tool.input_schema
+            )
+            for tool in result.tools
+        ],
+        latency_ms=result.latency_ms,
+        error_summary=result.error_summary,
+    )
+
+
 @router.post(
     "/tools/{tool_id}/versions",
     response_model=ToolVersionResponse,
@@ -395,10 +435,12 @@ async def add_tool_version(
     tool_id: uuid.UUID, payload: ToolVersionCreateRequest, actor: CurrentActor
 ) -> ToolVersionResponse:
     await authorization.require_permission(actor, Permission.TOOL_MANAGE)
-    version = await tool_service.add_version(
+    result = await tool_service.add_version(
         actor=actor, tool_id=tool_id, spec=payload.spec, risk_level=payload.risk_level
     )
-    return ToolVersionResponse.model_validate(version)
+    return ToolVersionResponse.model_validate(result.version).model_copy(
+        update={"warnings": result.warnings}
+    )
 
 
 @router.get("/tools/{tool_id}/versions", response_model=list[ToolVersionResponse], tags=["tools"])

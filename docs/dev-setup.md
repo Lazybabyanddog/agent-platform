@@ -117,6 +117,28 @@ python -m agent_platform.workers.outbox
 
 不启动 Outbox 进程时，发布事件会滞留在 outbox 表里，不影响同步调用链路。
 
+### 日志位置与格式
+
+日志始终写标准输出；未配置 `LOG_DIR` 时不产生任何文件，容器部署直接用 `docker logs` 即可。
+
+本地想留档时在 `backend/.env` 里设置 `LOG_DIR`（相对或绝对路径均可）：
+
+```bash
+LOG_DIR=logs
+LOG_LEVEL=INFO          # 想看节点流转用 DEBUG
+LOG_MAX_BYTES=10485760  # 单文件上限，超出轮转为 *.log.1
+LOG_BACKUP_COUNT=5      # 保留的历史文件数
+```
+
+API 进程写 `logs/api.log`，Outbox 进程写 `logs/outbox.log`，两者互不交错。每条是单行 JSON，可按字段过滤：
+
+```bash
+jq 'select(.event | startswith("llm."))' logs/api.log
+jq 'select(.trace_id == "trace-id-from-response")' logs/api.log
+```
+
+常用事件：`invocation.start` / `invocation.end`（每次调用首尾，含 status、steps、tokens、latency_ms）、`llm.call`、`llm.upstream_error`、`mcp.call`（建连与调用耗时分开）、`mcp.probe`、`outbox.publish_failed`；`runtime.node` 与 `runtime.route` 只在 `LOG_LEVEL=DEBUG` 时输出。日志不含提示词正文、模型响应正文、工具参数原文与凭据。
+
 ## 7. 启动前端
 
 ```bash

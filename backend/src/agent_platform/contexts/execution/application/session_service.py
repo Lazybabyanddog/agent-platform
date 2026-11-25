@@ -55,7 +55,9 @@ class SessionBinding:
 
 
 def gate_agent(agent: Agent) -> None:
-    """调用受理前的状态门禁：归档/停用立即失败关闭。"""
+    """调用受理前的状态门禁：软删除/归档/停用立即失败关闭。"""
+    if agent.deleted_at is not None:
+        raise ConflictError("agent has been deleted", code="AGENT_DELETED")
     if agent.status == AgentStatus.ARCHIVED:
         raise ConflictError("agent is archived", code="AGENT_ARCHIVED")
     if agent.status == AgentStatus.INACTIVE:
@@ -89,6 +91,20 @@ def _ttl(snapshot: dict[str, Any], now: datetime) -> datetime:
 
 def _history_limit(snapshot: dict[str, Any]) -> int:
     return int((snapshot.get("policy") or {}).get("history_token_limit") or 4000)
+
+
+TITLE_MAX_LENGTH = 60
+
+
+def session_title(values: dict[str, Any]) -> str | None:
+    """从首轮输入取最长可读文本作为会话标题：折叠空白后截断。"""
+    candidates = [
+        value for value in values.values() if isinstance(value, str) and value.strip()
+    ]
+    if not candidates:
+        return None
+    text = " ".join(max(candidates, key=len).split())
+    return text[:TITLE_MAX_LENGTH] or None
 
 
 class SessionService:
@@ -183,6 +199,7 @@ class SessionService:
                 agent_release_id=release.id,
                 agent_version_id=version.id,
                 expires_at=_ttl(version.snapshot, now),
+                created_by=actor.actor_id,
             )
             return SessionBinding(
                 session_id=row.id,
@@ -249,6 +266,7 @@ class SessionService:
                 session_key=key,
                 preview_snapshot=snapshot,
                 expires_at=_ttl(snapshot, now),
+                created_by=actor.actor_id,
             )
             return SessionBinding(
                 session_id=row.id,
@@ -293,6 +311,27 @@ class SessionService:
                 session_id=binding.session_id,
                 now=now,
                 expires_at=_ttl(binding.snapshot, now),
+            )
+
+    async def record_turn(
+        self,
+        *,
+        actor: ActorContext,
+        binding: SessionBinding,
+        values: dict[str, Any],
+    ) -> None:
+        """一轮产生运行后记账：累加轮数，首轮写入标题。
+
+        标题是首轮输入的截断，用于会话列表辨识。
+        """
+        title = session_title(values)
+        async with session_scope(actor.tenant_id) as session:
+            await self._repository.record_turn(
+                session,
+                tenant_id=actor.tenant_id,
+                session_id=binding.session_id,
+                title=title,
+                now=datetime.now(UTC),
             )
 
     def _validate_key(self, session_key: str) -> str:

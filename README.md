@@ -156,7 +156,7 @@ npm run dev        # http://localhost:5172 ，/api 代理到 8010
 
 后端不在 8010 时：`VITE_API_TARGET=http://localhost:8000 npm run dev`（PowerShell 用 `$env:VITE_API_TARGET="..."`）。
 
-控制台五个入口：Agent 列表 → Prompt 管理（列表 + 详情：消息模板与变量编辑、渲染预览、版本历史与对比）→ 版本与快照（含 diff）→ 发布与回滚 → 调试台（同步调用 + 轨迹）。
+控制台五个入口：Agent 列表 → Prompt 管理（列表 + 详情：消息模板与变量编辑、渲染预览、版本历史与对比）→ 版本与快照（含 diff）→ 发布与回滚 → 调试台（会话列表 + 回放续聊 + 轨迹）。
 
 Prompt 页面以 `/auth/me` 返回的权限集合为准：只有 `prompt:read` 的只读账号仍可查看模板、变量、版本与渲染预览，但「新建 / 保存为新版本」等写入口不显示（写操作对应 `prompt:manage`）。
 
@@ -278,6 +278,27 @@ curl -X POST http://localhost:8010/api/v1/agents/$AGENT_ID/preview \
     "input": {"question": "hello"}
   }'
 ```
+
+**调试台会话历史**：每次 `preview` 可带 `preview_session_id`（最长 128，任意客户端生成的稳定标识）串联多轮。调试台左侧按 Agent + 环境列出会话，选中后先回放历史再原地续聊。
+
+- `GET /sessions?agent_id=...&env=DEV&page=1&page_size=20` 列出会话，响应新增 `title`、`turn_count`、`owned`、`expired`、`preview_config_hash`。
+- `mine_only` 默认 `true`：只返回本人创建（`created_by` = 自己）或未记录创建者的存量会话；传 `false` 可看同租户其他成员会话（仍要求 `run:read`）。
+- `include_expired` 默认 `true`：过期会话照常返回并标记 `expired=true`。过期只影响“能否继续发送”，历史始终可读；同一 `session_key` 再次被受理时会回收旧行、换新会话。
+- `GET /sessions/{session_id}/history?turns_limit=50` 回放该会话：直接读 LangGraph checkpoint 的 `messages`，不新建消息表、不产生运行。`turns_limit` 上限 200，超出时返回最近 N 轮并置 `truncated=true`；轮次 `index` 仍按全局编号。
+- 接口要求 `agent:read`；访问他人会话与不存在会话统一返回 404。正文按会话归属返回：创建者回放自己的会话即可拿到原文，不要求额外权限，也没有租户级留存开关。
+- 续聊沿用会话首轮固化的快照：即使请求携带了新的引用或参数，也只作用于新会话；列表行的 `preview_config_hash` 可用来核对绑定是否变化。
+
+```bash
+# 列出当前 Agent 在 DEV 的本人会话
+curl "http://localhost:8010/api/v1/sessions?agent_id=$AGENT_ID&env=DEV&mine_only=true" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 回放最近 50 轮（不产生运行）
+curl "http://localhost:8010/api/v1/sessions/$SESSION_ID/history?turns_limit=50" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+实现约束与升级检查项见 [`docs/session-history.md`](docs/session-history.md)。
 
 ## 工具接入（HTTP / MCP）
 

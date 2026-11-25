@@ -66,12 +66,7 @@ class TenantResponse(BaseModel):
     code: str
     name: str
     status: TenantStatus
-    content_retention_enabled: bool
     created_at: datetime
-
-
-class InsightRetentionRequest(BaseModel):
-    enabled: bool
 
 
 class MemberCreateRequest(BaseModel):

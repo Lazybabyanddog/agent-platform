@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { ApiError, describeError } from '@/api/client'
-import { createPrompt, listPrompts, type Prompt } from '@/api/endpoints'
+import { createPrompt, deletePrompt, listPrompts, type Prompt } from '@/api/endpoints'
 import { useSessionStore } from '@/stores/session'
 import { PROMPT_CODE_PATTERN } from '@/utils/prompt'
 
@@ -107,6 +107,29 @@ async function submit(): Promise<void> {
 }
 
 onMounted(load)
+
+async function remove(prompt: Prompt): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `删除后「${prompt.code}」的全部版本会一并清除且不可恢复，确定删除？`,
+      '删除 Prompt',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await deletePrompt(prompt.id)
+    ElMessage.success(`已删除 Prompt ${prompt.code}`)
+    await load()
+  } catch (err) {
+    if (err instanceof ApiError && err.code === 'PROMPT_IN_USE') {
+      ElMessage.warning('该 Prompt 仍被 Agent 版本引用，请先在对应 Agent 中解除引用后再删除')
+      return
+    }
+    ElMessage.error(describeError(err))
+  }
+}
 </script>
 
 <template>
@@ -136,11 +159,12 @@ onMounted(load)
           <el-tag :type="statusType(row.status)" size="small">{{ row.status }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="130" fixed="right">
+      <el-table-column label="操作" width="190" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" @click="router.push(`/prompts/${row.id}`)">
             模板与版本
           </el-button>
+          <el-button v-if="canManage" link type="danger" @click="remove(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>

@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError, describeError } from '@/api/client'
 import {
+  activateAgent,
   createAgent,
+  deactivateAgent,
+  deleteAgent,
   ENVIRONMENTS,
   listAgents,
   type Agent,
@@ -36,6 +39,10 @@ const formRef = ref<FormInstance>()
 const form = ref({ code: '', name: '', description: '', tags: [] as string[] })
 
 const canManage = computed(() => session.can('agent:manage'))
+
+/** 正在启停 / 删除的行，避免整表 loading 与重复点击。 */
+const togglingId = ref<string | null>(null)
+const deletingId = ref<string | null>(null)
 
 const rules: FormRules = {
   code: [
@@ -125,6 +132,71 @@ function statusType(status: AgentStatus): 'success' | 'warning' | 'info' | 'dang
   if (status === 'DRAFT') return 'warning'
   if (status === 'ARCHIVED') return 'danger'
   return 'info'
+}
+
+function statusLabel(status: AgentStatus): string {
+  if (status === 'ACTIVE') return '启用中'
+  if (status === 'DRAFT') return '草稿'
+  if (status === 'ARCHIVED') return '已归档'
+  return '已停用'
+}
+
+/** 只有真正发布过的 Agent 才有启用/停用语义，草稿与归档走状态标签。 */
+function canToggle(row: Agent): boolean {
+  return row.status === 'ACTIVE' || row.status === 'INACTIVE'
+}
+
+async function toggleStatus(row: Agent, active: boolean): Promise<void> {
+  if (!active) {
+    try {
+      await ElMessageBox.confirm(
+        `停用后 ${row.code} 在所有环境的新调用都会被拒绝（AGENT_INACTIVE），发布指针保持不变。确定停用吗？`,
+        '停用 Agent',
+        { type: 'warning', confirmButtonText: '停用', cancelButtonText: '取消' },
+      )
+    } catch {
+      return
+    }
+  }
+  togglingId.value = row.id
+  try {
+    await (active ? activateAgent(row.id) : deactivateAgent(row.id))
+    ElMessage.success(`${row.code} 已${active ? '启用' : '停用'}`)
+    await load()
+  } catch (err) {
+    if (err instanceof ApiError && err.code === 'AGENT_NOT_PUBLISHED') {
+      ElMessage.warning('该 Agent 尚未发布到任何环境，无法启用；请先发布版本')
+      await load()
+      return
+    }
+    ElMessage.error(describeError(err))
+    await load()
+  } finally {
+    togglingId.value = null
+  }
+}
+
+async function removeAgent(row: Agent): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `删除后 ${row.code} 会立即从列表消失、所有环境的新调用被拒绝，编码可被重新使用；版本、发布与运行历史仍保留。确定删除吗？`,
+      '删除 Agent',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  deletingId.value = row.id
+  try {
+    await deleteAgent(row.id)
+    ElMessage.success(`已删除 Agent ${row.code}`)
+    await load()
+  } catch (err) {
+    ElMessage.error(describeError(err))
+    await load()
+  } finally {
+    deletingId.value = null
+  }
 }
 
 function envState(row: Agent, env: Environment): AgentEnvironmentState | null {
@@ -237,7 +309,12 @@ onMounted(load)
           @clear="search"
         />
         <el-select v-model="statusFilter" placeholder="全部状态" clearable class="select" @change="search">
-          <el-option v-for="item in STATUS_OPTIONS" :key="item" :label="item" :value="item" />
+          <el-option
+            v-for="item in STATUS_OPTIONS"
+            :key="item"
+            :label="statusLabel(item)"
+            :value="item"
+          />
         </el-select>
         <el-select v-model="typeFilter" placeholder="全部类型" clearable class="select" @change="search">
           <el-option v-for="item in TYPE_OPTIONS" :key="item" :label="item" :value="item" />
@@ -263,9 +340,21 @@ onMounted(load)
         <el-table-column label="类型" width="90">
           <template #default="{ row }">{{ row.type }}</template>
         </el-table-column>
-        <el-table-column label="状态" width="100">
+        <el-table-column label="状态" width="120">
           <template #default="{ row }">
-            <el-tag :type="statusType(row.status)" size="small">{{ row.status }}</el-tag>
+            <el-switch
+              v-if="canManage && canToggle(row)"
+              :model-value="row.status === 'ACTIVE'"
+              :loading="togglingId === row.id"
+              :disabled="togglingId === row.id"
+              inline-prompt
+              active-text="启用"
+              inactive-text="停用"
+              @change="(value: string | number | boolean) => toggleStatus(row, Boolean(value))"
+            />
+            <el-tag v-else :type="statusType(row.status)" size="small">
+              {{ statusLabel(row.status) }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column
@@ -299,7 +388,7 @@ onMounted(load)
         <el-table-column prop="updated_at" label="更新时间" width="180">
           <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="190" fixed="right">
+        <el-table-column label="操作" width="250" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="router.push(`/agents/${row.id}`)">
               配置
@@ -309,6 +398,15 @@ onMounted(load)
             </el-button>
             <el-button link type="primary" @click="router.push(`/playground?agentId=${row.id}`)">
               调试
+            </el-button>
+            <el-button
+              v-if="canManage"
+              link
+              type="danger"
+              :loading="deletingId === row.id"
+              @click="removeAgent(row)"
+            >
+              删除
             </el-button>
           </template>
         </el-table-column>

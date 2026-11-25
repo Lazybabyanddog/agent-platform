@@ -200,6 +200,7 @@ async def create_agent_version(
     tool_version_ids: list[str] | None = None,
     params: dict[str, Any] | None = None,
     policy: dict[str, Any] | None = None,
+    runtime_context: list[str] | None = None,
 ) -> dict[str, Any]:
     response = await api_client.post(
         f"/api/v1/agents/{agent_id}/versions",
@@ -210,6 +211,7 @@ async def create_agent_version(
             "tool_version_ids": tool_version_ids or [],
             "params": params or {},
             "policy": policy or {},
+            "runtime_context": runtime_context or [],
         },
     )
     assert response.status_code == 201, response.text

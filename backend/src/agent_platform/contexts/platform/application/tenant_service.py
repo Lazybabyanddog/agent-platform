@@ -77,30 +77,6 @@ class TenantService:
                 actor=actor,
             )
 
-    async def set_content_retention(
-        self, *, tenant_id: uuid.UUID, enabled: bool, actor: ActorContext
-    ) -> Tenant:
-        async with system_session_scope() as session:
-            tenant = await TenantRepository().by_id(session, tenant_id)
-            if tenant is None:
-                raise NotFoundError("tenant not found")
-            tenant.content_retention_enabled = enabled
-            await audit_service.record(
-                session,
-                tenant_id=tenant_id,
-                action=f"tenant.insight_retention_{'enabled' if enabled else 'disabled'}",
-                resource_type="tenant",
-                resource_id=tenant_id,
-                actor=actor,
-                detail={"content_retention_enabled": enabled},
-            )
-            return tenant
-
-    async def content_retention_enabled(self, tenant_id: uuid.UUID) -> bool:
-        async with system_session_scope() as session:
-            tenant = await TenantRepository().by_id(session, tenant_id)
-            return bool(tenant is not None and tenant.content_retention_enabled)
-
     async def ensure_active(self, tenant_id: uuid.UUID) -> Tenant:
         async with system_session_scope() as session:
             tenant = await TenantRepository().by_id(session, tenant_id)

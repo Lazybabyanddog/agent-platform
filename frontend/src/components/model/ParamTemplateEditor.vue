@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 
 import NoticeBanner from '@/components/common/NoticeBanner.vue'
+import { isSupportedModelParam, paramHint, SUPPORTED_MODEL_PARAMS } from '@/utils/modelParams'
 
 /**
  * 参数模板编辑器：按行编辑参数类型与取值范围。
@@ -25,32 +26,7 @@ interface TemplateRow {
   description: string
 }
 
-/** 与后端 `SUPPORTED_MODEL_PARAMS` 对齐；新增参数时两处一起改。 */
-const SUPPORTED_PARAMS = [
-  'temperature',
-  'max_tokens',
-  'max_completion_tokens',
-  'top_p',
-  'presence_penalty',
-  'frequency_penalty',
-  'stop',
-  'seed',
-  'timeout',
-] as const
-
 const TIMEOUT_PARAM = 'timeout'
-
-const NUMERIC_HINTS: Record<string, string> = {
-  temperature: '0 ~ 2，越大越发散',
-  top_p: '0 ~ 1，与 temperature 二选一调整',
-  presence_penalty: '-2 ~ 2',
-  frequency_penalty: '-2 ~ 2',
-  max_tokens: '正整数，不超过模型上下文窗口',
-  max_completion_tokens: '正整数，部分上游使用该键替代 max_tokens',
-  seed: '整数，便于上游复现',
-  stop: '字符串或字符串数组',
-  timeout: '秒；实际调用取模板值与运行预算的较小者',
-}
 
 const props = withDefaults(
   defineProps<{
@@ -178,21 +154,21 @@ function changeType(row: TemplateRow): void {
 const unsupported = computed(() =>
   rows.value
     .map((row) => row.name.trim())
-    .filter((name) => name && !SUPPORTED_PARAMS.includes(name as (typeof SUPPORTED_PARAMS)[number])),
+    .filter((name) => name && !isSupportedModelParam(name)),
 )
 
 const usedNames = computed(() => new Set(rows.value.map((row) => row.name.trim())))
 
 const availableOptions = computed(() =>
-  SUPPORTED_PARAMS.filter((name) => !usedNames.value.has(name)),
+  SUPPORTED_MODEL_PARAMS.filter((name) => !usedNames.value.has(name)),
 )
 
 function optionsFor(row: TemplateRow): readonly string[] {
-  return SUPPORTED_PARAMS.filter((name) => name === row.name || !usedNames.value.has(name))
+  return SUPPORTED_MODEL_PARAMS.filter((name) => name === row.name || !usedNames.value.has(name))
 }
 
 function hintFor(row: TemplateRow): string | null {
-  return NUMERIC_HINTS[row.name] ?? null
+  return paramHint(row.name) || null
 }
 
 function localError(row: TemplateRow): string | null {
@@ -231,7 +207,7 @@ function validate(): Record<string, string> {
       continue
     }
     seen.add(name)
-    if (!SUPPORTED_PARAMS.includes(name as (typeof SUPPORTED_PARAMS)[number])) {
+    if (!isSupportedModelParam(name)) {
       issues[`param_template.${name}`] = `平台不支持参数 ${name}`
       continue
     }

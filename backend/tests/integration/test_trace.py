@@ -161,8 +161,8 @@ async def test_trace_records_llm_and_tool_calls_with_one_trace_id(
     assert [entry["is_slowest"] for entry in body["entries"]] == [False, True, False]
     assert body["slowest_span_id"] == body["entries"][1]["span_id"]
     assert body["slowest_latency_ms"] >= 50
-    # 未开启正文留存，只返回摘要
-    assert all(entry["content"] is None for entry in body["entries"])
+    # 管理员可见正文，不再依赖租户开关
+    assert all(entry["content"] is not None for entry in body["entries"])
 
     async with session_scope(tenant_env.tenant_id) as session:
         llm_calls = await LLMCallRepository().list_for_run(
@@ -174,8 +174,8 @@ async def test_trace_records_llm_and_tool_calls_with_one_trace_id(
     assert len(llm_calls) == 2
     assert len(tool_calls) == 1
     assert {call.trace_id for call in [*llm_calls, *tool_calls]} == {"trace-insight-1"}
-    assert tool_calls[0].request_body is None
-    assert tool_calls[0].response_body is None
+    assert tool_calls[0].request_body is not None
+    assert tool_calls[0].response_body is not None
     assert "hi" not in json.dumps(tool_calls[0].request_summary)
 
 

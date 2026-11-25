@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import openai
@@ -20,6 +21,9 @@ from agent_platform.contexts.execution.domain.ports import (
     ModelResponse,
     ToolCall,
 )
+from agent_platform.shared.logging import get_logger
+
+logger = get_logger(__name__)
 
 _ALLOWED_PARAMS = {
     "temperature",
@@ -118,28 +122,49 @@ class LangChainModelAdapter:
             **kwargs,
         )
 
+    def _log_upstream_error(
+        self, model_name: str, code: ModelErrorCode, started: float, exc: Exception
+    ) -> None:
+        """只记归一错误码与上游状态码，不上报错误体（可能含凭据）。"""
+        logger.warning(
+            "llm.upstream_error",
+            model_name=model_name,
+            error_code=code.value,
+            upstream_status=getattr(exc, "status_code", None),
+            latency_ms=int((time.perf_counter() - started) * 1000),
+        )
+
     async def chat(self, request: ModelRequest) -> ModelResponse:
-        client = self._client(request.model_name, request.params)
+        model_name = request.model_name
+        client = self._client(model_name, request.params)
         messages = _to_lc_messages(request.messages)
+        started = time.perf_counter()
         try:
             if request.tools:
                 client = client.bind_tools(_tool_schemas(request))
             message: AIMessage = await client.ainvoke(messages)
         except openai.RateLimitError as exc:
+            self._log_upstream_error(model_name, ModelErrorCode.RATE_LIMITED, started, exc)
             raise ModelPortError(ModelErrorCode.RATE_LIMITED, str(exc)) from exc
         except (openai.APITimeoutError, TimeoutError) as exc:
+            self._log_upstream_error(model_name, ModelErrorCode.TIMEOUT, started, exc)
             raise ModelPortError(ModelErrorCode.TIMEOUT, str(exc)) from exc
         except (openai.AuthenticationError, openai.PermissionDeniedError) as exc:
+            self._log_upstream_error(model_name, ModelErrorCode.AUTH, started, exc)
             raise ModelPortError(ModelErrorCode.AUTH, str(exc)) from exc
         except (openai.BadRequestError, openai.UnprocessableEntityError) as exc:
+            self._log_upstream_error(model_name, ModelErrorCode.INVALID_REQUEST, started, exc)
             raise ModelPortError(ModelErrorCode.INVALID_REQUEST, str(exc)) from exc
         except openai.APIConnectionError as exc:
+            self._log_upstream_error(model_name, ModelErrorCode.UPSTREAM, started, exc)
             raise ModelPortError(ModelErrorCode.UPSTREAM, str(exc)) from exc
         except openai.APIStatusError as exc:
+            self._log_upstream_error(model_name, ModelErrorCode.UPSTREAM, started, exc)
             raise ModelPortError(ModelErrorCode.UPSTREAM, str(exc)) from exc
         except ModelPortError:
             raise
         except Exception as exc:  # pragma: no cover - 兜底避免把未知异常漏到执行层
+            self._log_upstream_error(model_name, ModelErrorCode.UNKNOWN, started, exc)
             raise ModelPortError(ModelErrorCode.UNKNOWN, str(exc)) from exc
 
         input_tokens, output_tokens = _token_usage(message)

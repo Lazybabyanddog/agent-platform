@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent_platform.contexts.catalog.domain.enums import (
+    McpProbeVerdict,
     ModelStatus,
     PromptStatus,
     ProviderStatus,
@@ -247,6 +248,8 @@ class ToolVersionResponse(BaseModel):
     spec: dict[str, Any]
     risk_level: RiskLevel
     config_hash: str
+    # 只在保存版本时返回：不阻塞保存的契约提示（例如日期参数缺 format）
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
 
 
@@ -262,3 +265,26 @@ class ToolExecuteResponse(BaseModel):
     request_digest: str
     response_digest: str | None
     error_code: str | None
+
+
+class McpProbeRequest(BaseModel):
+    """探测入参：只有「连到哪里、怎么连」，没有 tool_name——那正是探测的产出。"""
+
+    transport: str = Field(default="streamable_http", max_length=32)
+    url: str = Field(min_length=1, max_length=1024)
+    auth: dict[str, Any] = Field(default_factory=lambda: {"type": "none"})
+    headers: dict[str, Any] = Field(default_factory=dict)
+    timeout_s: float = 15.0
+
+
+class McpProbeToolResponse(BaseModel):
+    name: str
+    description: str | None
+    input_schema: dict[str, Any] | None
+
+
+class McpProbeResponse(BaseModel):
+    verdict: McpProbeVerdict
+    tools: list[McpProbeToolResponse]
+    latency_ms: int
+    error_summary: str | None

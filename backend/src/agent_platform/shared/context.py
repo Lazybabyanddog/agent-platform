@@ -9,6 +9,8 @@ import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass
 
+import structlog
+
 
 @dataclass(frozen=True, slots=True)
 class ActorContext:
@@ -51,7 +53,12 @@ def get_request_id() -> str | None:
 
 
 def set_actor(actor: ActorContext | None) -> None:
+    """设置调用者，并同步到日志上下文，避免每处调用点手工绑定 tenant_id。"""
     _actor.set(actor)
+    if actor is None:
+        structlog.contextvars.unbind_contextvars("tenant_id")
+    else:
+        structlog.contextvars.bind_contextvars(tenant_id=str(actor.tenant_id))
 
 
 def get_actor() -> ActorContext | None:

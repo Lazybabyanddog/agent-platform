@@ -46,10 +46,6 @@ class Tenant(Base, IdMixin, TimestampMixin):
         Enum(TenantStatus, native_enum=False, length=32), nullable=False, default=TenantStatus.ACTIVE
     )
     description: Mapped[str | None] = mapped_column(Text)
-    # 正文留存需租户显式开启，默认只落摘要与长度
-    content_retention_enabled: Mapped[bool] = mapped_column(
-        nullable=False, default=False, server_default=text("false")
-    )
 
 
 class UserAccount(Base, IdMixin, TimestampMixin):

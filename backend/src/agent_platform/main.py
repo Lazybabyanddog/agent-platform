@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI):
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    configure_logging(settings)
+    configure_logging(settings, service="api")
 
     app = FastAPI(
         title="Agent Platform API",

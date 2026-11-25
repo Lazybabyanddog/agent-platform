@@ -68,6 +68,19 @@ class ToolCallRepository:
         )
         return list(result)
 
+    async def list_for_runs(
+        self, session: AsyncSession, *, tenant_id: uuid.UUID, run_ids: list[uuid.UUID]
+    ) -> list[ToolCall]:
+        """批量取多个运行的工具调用，供会话历史一次组装。"""
+        if not run_ids:
+            return []
+        result = await session.scalars(
+            select(ToolCall)
+            .where(ToolCall.tenant_id == tenant_id, ToolCall.run_id.in_(run_ids))
+            .order_by(ToolCall.started_at, ToolCall.span_id)
+        )
+        return list(result)
+
     async def list_for_tool(
         self,
         session: AsyncSession,

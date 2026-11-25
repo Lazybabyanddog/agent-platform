@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -36,7 +37,14 @@ SCHEMA = "agent"
 class Agent(Base, IdMixin, TimestampMixin):
     __tablename__ = "agent"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "code", name="uq_agent_tenant_id_code"),
+        # 软删除后编码应立即释放，所以唯一性只约束未删除的行。
+        Index(
+            "uq_agent_tenant_id_code_active",
+            "tenant_id",
+            "code",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
         {"schema": SCHEMA},
     )
 
@@ -51,6 +59,10 @@ class Agent(Base, IdMixin, TimestampMixin):
     tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     status: Mapped[AgentStatus] = mapped_column(
         Enum(AgentStatus, native_enum=False, length=32), nullable=False, default=AgentStatus.DRAFT
+    )
+    # 软删除时间：非空即视为已删除，所有读取路径都会过滤掉它。
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
     )
 
 

@@ -9,6 +9,8 @@ import {
   previewAgent,
   type PreviewRequest,
   type RunTrace,
+  type SessionHistoryMessage,
+  type SessionHistoryTurn,
 } from '@/api/endpoints'
 import JsonBlock from '@/components/JsonBlock.vue'
 
@@ -45,6 +47,23 @@ const props = defineProps<{
   variables?: PromptVariableView[]
   configDirty?: boolean
   disabled?: boolean
+  /** 受控模式：父级选中的会话标识（即 `session_key`）；为空表示新会话。 */
+  sessionKey?: string | null
+  /** 受控模式：服务端归一化的历史轮次；未传时保持组件自持。 */
+  historyTurns?: SessionHistoryTurn[]
+  /** 历史会话已过期：只读回放，禁止继续发送。 */
+  expired?: boolean
+  historyLoading?: boolean
+  /** 服务端以运行记录重建了轮次（缺少用户消息锚点），回答可能缺失。 */
+  historyReconstructed?: boolean
+}>()
+
+const emit = defineEmits<{
+  (
+    e: 'turn-completed',
+    payload: { sessionKey: string; at: string; status: string; runtimeContext?: string[] },
+  ): void
+  (e: 'request-new-session'): void
 }>()
 
 const primaryVariable = computed<PromptVariableView | null>(() => {
@@ -108,11 +127,14 @@ function newSessionId(): string {
   return `preview-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-const sessionId = ref(newSessionId())
+const draftSessionId = ref(newSessionId())
+/** 受控时用父级选中的会话标识续聊，自持时用本地生成的标识。 */
+const sessionId = computed(() => props.sessionKey ?? draftSessionId.value)
 const turns = ref<ChatTurn[]>([])
 const draft = ref('')
 const sending = ref(false)
 const listRef = ref<HTMLElement | null>(null)
+const readOnly = computed(() => props.expired === true)
 
 const traceVisible = ref(false)
 const traceLoading = ref(false)
@@ -130,9 +152,10 @@ async function scrollToBottom(): Promise<void> {
 }
 
 function startNewSession(): void {
-  sessionId.value = newSessionId()
+  draftSessionId.value = newSessionId()
   turns.value = []
   draft.value = ''
+  if (props.historyTurns !== undefined) emit('request-new-session')
 }
 
 async function confirmNewSessionIfDirty(): Promise<boolean> {
@@ -149,6 +172,74 @@ async function confirmNewSessionIfDirty(): Promise<boolean> {
     return false
   }
 }
+
+function messageText(
+  message: SessionHistoryMessage | null | undefined,
+  fallback: string,
+): string {
+  if (message?.content) return message.content
+  return fallback
+}
+
+/** 历史轮次按「用户 → 助手」展开成气泡；工具条目挂在对应助手消息上。 */
+function historyToTurns(history: SessionHistoryTurn[]): ChatTurn[] {
+  const list: ChatTurn[] = []
+  for (const turn of history) {
+    list.push({
+      id: `h-${turn.index}-u`,
+      role: 'user',
+      content: messageText(turn.user, '（内容为空）'),
+    })
+    const tools: ToolCallView[] = (turn.tools ?? []).map((tool, index) => ({
+      spanId: `h-${turn.index}-t-${index}`,
+      code: tool.name,
+      status: tool.status,
+      latencyMs: tool.latency_ms ?? 0,
+    }))
+    list.push({
+      id: `h-${turn.index}-a`,
+      role: 'assistant',
+      content: messageText(turn.assistant, '（无回答）'),
+      runId: turn.run_id ?? undefined,
+      traceId: turn.trace_id ?? undefined,
+      status: turn.status ?? undefined,
+      error: Boolean(turn.error) || turn.status === 'FAILED',
+      tools: tools.length ? tools : undefined,
+    })
+  }
+  return list
+}
+
+/** 历史空但本地有轮次（刚发完未落库 / 服务端无法解析）时的提示。 */
+const historyNotice = ref('')
+
+// 只在会话标识真正切换时清空气泡与草稿；同会话的后续渲染一律不动本地内容。
+watch(
+  () => sessionId.value,
+  (sid, previous) => {
+    if (previous === undefined || sid === previous) return
+    turns.value = []
+    draft.value = ''
+    historyNotice.value = ''
+  },
+  { immediate: true },
+)
+
+// 历史是"服务端视图"：收到非空轮次才覆盖本地；空历史保持既有气泡并说明原因。
+watch(
+  () => props.historyTurns,
+  (history) => {
+    if (history === undefined) return
+    if (!history.length) {
+      if (turns.value.length) historyNotice.value = '服务端暂未返回可回放的历史，当前展示本次会话内容。'
+      return
+    }
+    historyNotice.value = ''
+    turns.value = historyToTurns(history)
+    void scrollToBottom()
+  },
+  { immediate: true },
+)
 
 function previewErrorMessage(err: unknown): string {
   if (err instanceof ApiError) {
@@ -180,10 +271,11 @@ async function attachTrace(turn: ChatTurn, runId: string): Promise<void> {
 
 async function send(): Promise<void> {
   const text = draft.value.trim()
-  if (!text || sending.value || props.disabled) return
+  if (!text || sending.value || props.disabled || readOnly.value) return
   const canSend = await confirmNewSessionIfDirty()
   if (!canSend) return
 
+  const activeKey = sessionId.value
   const userTurn: ChatTurn = {
     id: `u-${Date.now()}`,
     role: 'user',
@@ -197,7 +289,7 @@ async function send(): Promise<void> {
   try {
     const response = await previewAgent(
       props.agentId,
-      props.buildRequest(buildInput(text), sessionId.value),
+      props.buildRequest(buildInput(text), activeKey),
     )
     const errorText = response.error
       ? String((response.error as Record<string, unknown>).message ?? '执行失败')
@@ -213,11 +305,19 @@ async function send(): Promise<void> {
       error: response.status !== 'SUCCESS',
     }
     turns.value.push(assistantTurn)
+    const injected = (response.preview_snapshot as { runtime_context?: unknown } | undefined)
+      ?.runtime_context
+    emit('turn-completed', {
+      sessionKey: activeKey,
+      at: new Date().toISOString(),
+      status: response.status,
+      runtimeContext: Array.isArray(injected)
+        ? injected.filter((item): item is string => typeof item === 'string')
+        : undefined,
+    })
     void attachTrace(assistantTurn, response.run_id)
   } catch (err) {
-    if (err instanceof ApiError && err.code === 'SESSION_BINDING_UNAVAILABLE') {
-      startNewSession()
-    }
+    // 绑定失效不再静默换会话：保留当前回放内容，明确提示调用方新建。
     turns.value.push({
       id: `a-${Date.now()}`,
       role: 'assistant',
@@ -262,13 +362,45 @@ defineExpose({ startNewSession })
           <el-tag v-if="turns.length" size="small" type="warning" effect="plain">
             {{ Math.ceil(turns.length / 2) }} 轮
           </el-tag>
+          <el-tag v-if="readOnly" size="small" type="danger" effect="plain">已过期</el-tag>
         </div>
         <el-button size="small" :disabled="sending" @click="startNewSession">新会话</el-button>
       </div>
     </template>
 
-    <div ref="listRef" class="chat-list">
-      <el-empty v-if="!turns.length" description="发送一条消息开始预览；配置只影响新会话。" />
+    <el-alert
+      v-if="readOnly"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="expired-alert"
+      title="该会话已过期，只能回放历史；如需继续请新建会话。"
+    >
+      <el-button link type="primary" @click="startNewSession">新建会话</el-button>
+    </el-alert>
+
+    <el-alert
+      v-if="historyReconstructed && turns.length"
+      type="info"
+      :closable="false"
+      show-icon
+      class="rebuild-alert"
+      title="该会话缺少用户消息锚点，轮次由运行记录重建；缺失的回答显示为空。"
+    />
+    <el-alert
+      v-if="historyNotice"
+      type="info"
+      :closable="false"
+      show-icon
+      class="rebuild-alert"
+      :title="historyNotice"
+    />
+
+    <div ref="listRef" v-loading="historyLoading" class="chat-list">
+      <el-empty
+        v-if="!turns.length && !historyLoading"
+        description="发送一条消息开始预览；配置只影响新会话。"
+      />
       <div
         v-for="turn in turns"
         :key="turn.id"
@@ -331,12 +463,17 @@ defineExpose({ startNewSession })
         :rows="3"
         resize="none"
         placeholder="输入消息，Enter 发送，Shift+Enter 换行"
-        :disabled="disabled"
+        :disabled="disabled || readOnly"
         @keydown.enter.exact.prevent="send"
       />
       <div class="composer-actions">
-        <span class="hint">同一会话沿用首轮配置</span>
-        <el-button type="primary" :loading="sending" :disabled="disabled || !draft.trim()" @click="send">
+        <span class="hint">{{ readOnly ? '过期会话只读' : '同一会话沿用首轮配置' }}</span>
+        <el-button
+          type="primary"
+          :loading="sending"
+          :disabled="disabled || readOnly || !draft.trim()"
+          @click="send"
+        >
           发送
         </el-button>
       </div>
@@ -417,6 +554,11 @@ defineExpose({ startNewSession })
 
 .panel-title {
   font-weight: 600;
+}
+
+.expired-alert,
+.rebuild-alert {
+  margin-bottom: 8px;
 }
 
 .chat-list {

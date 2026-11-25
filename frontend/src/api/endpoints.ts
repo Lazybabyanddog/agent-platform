@@ -25,6 +25,10 @@ export type PreviewResponse = Schema<'PreviewResponse'>
 export type RunKind = Schema<'RunKind'>
 export type SessionItem = Schema<'SessionItemResponse'>
 export type SessionPage = Schema<'SessionPageResponse'>
+export type SessionHistory = Schema<'SessionHistoryResponse'>
+export type SessionHistoryTurn = Schema<'SessionHistoryTurnResponse'>
+export type SessionHistoryTool = Schema<'SessionHistoryToolResponse'>
+export type SessionHistoryMessage = Schema<'SessionHistoryMessageResponse'>
 export type RunSummaryItem = Schema<'RunSummaryItemResponse'>
 export type RunPage = Schema<'RunPageResponse'>
 export type RunMetrics = Schema<'RunMetricsResponse'>
@@ -56,6 +60,9 @@ export type ToolCallItem = Schema<'ToolCallItemResponse'>
 export type RiskLevel = Schema<'RiskLevel'>
 export type ToolStatus = Schema<'ToolStatus'>
 export type ToolType = Schema<'ToolType'>
+export type McpProbeVerdict = Schema<'McpProbeVerdict'>
+export type McpProbeTool = Schema<'McpProbeToolResponse'>
+export type McpProbeResult = Schema<'McpProbeResponse'>
 
 export const ENVIRONMENTS: Environment[] = ['DEV', 'TEST', 'PROD']
 
@@ -86,6 +93,7 @@ type UpdateModelStatusBody = RequestBodyOf<
   Operation<'/api/v1/models/{model_id}/status', 'patch'>
 >
 type CreateToolBody = RequestBodyOf<Operation<'/api/v1/tools', 'post'>>
+type ProbeMcpBody = RequestBodyOf<Operation<'/api/v1/tools/probe-mcp', 'post'>>
 type CreateToolVersionBody = RequestBodyOf<Operation<'/api/v1/tools/{tool_id}/versions', 'post'>>
 type UpdateToolStatusBody = RequestBodyOf<Operation<'/api/v1/tools/{tool_id}/status', 'patch'>>
 type ExecuteToolBody = RequestBodyOf<
@@ -203,15 +211,30 @@ export function invokeAgent(agentId: string, body: InvokeBody): Promise<InvokeRe
 export interface SessionListQuery {
   agent_id: string
   kind?: RunKind | null
+  env?: Environment | null
   start?: string | null
   end?: string | null
+  /** 默认 true：只列出本人创建（或未记录创建者）的会话；false 可见同租户其他用户会话。 */
+  mine_only?: boolean
+  /** 默认 true：过期会话仍返回并标记 `expired=true`。 */
+  include_expired?: boolean
   page?: number
   page_size?: number
 }
 
-/** 会话列表：按 Agent 与活跃时间范围分页，含绑定版本与状态。 */
+/** 会话列表：按 Agent 与活跃时间范围分页，含标题、轮数、归属与过期标记。 */
 export function listSessions(query: SessionListQuery): Promise<SessionPage> {
   return api.get<SessionPage>('/sessions', { ...query })
+}
+
+/** 会话历史：只读回放服务端归一化的轮次，不产生运行。 */
+export function getSessionHistory(
+  sessionId: string,
+  turnsLimit?: number,
+): Promise<SessionHistory> {
+  return api.get<SessionHistory>(`/sessions/${sessionId}/history`, {
+    turns_limit: turnsLimit,
+  })
 }
 
 export interface RunListQuery {
@@ -310,6 +333,11 @@ export function createPrompt(body: CreatePromptBody): Promise<Prompt> {
   return api.post<Prompt>('/prompts', body)
 }
 
+/** 删除 Prompt 及其全部版本；仍被 Agent 版本引用时后端返回 409 `PROMPT_IN_USE`。 */
+export function deletePrompt(promptId: string): Promise<void> {
+  return api.delete<void>(`/prompts/${promptId}`)
+}
+
 export function listPromptVersions(promptId: string): Promise<PromptVersion[]> {
   return api.get<PromptVersion[]>(`/prompts/${promptId}/versions`)
 }
@@ -359,6 +387,11 @@ export function updateToolStatus(toolId: string, body: UpdateToolStatusBody): Pr
   return api.patch<Tool>(`/tools/${toolId}/status`, body)
 }
 
+/** 探测只读：连远端取工具清单，用于注册前填充契约；不创建工具也不出版本。 */
+export function probeMcpTool(body: ProbeMcpBody): Promise<McpProbeResult> {
+  return api.post<McpProbeResult>('/tools/probe-mcp', body)
+}
+
 export function listToolVersions(toolId: string): Promise<ToolVersion[]> {
   return api.get<ToolVersion[]>(`/tools/${toolId}/versions`)
 }
@@ -404,6 +437,8 @@ export function listToolCalls(
 }
 
 export type Secret = Schema<'SecretResponse'>
+export type SecretCreateInput = Schema<'SecretCreateRequest'>
+export type SecretRotateInput = Schema<'SecretRotateRequest'>
 
 export interface SecretPage {
   items: Secret[]
@@ -412,4 +447,18 @@ export interface SecretPage {
 
 export function listSecrets(): Promise<SecretPage> {
   return api.get<SecretPage>('/secrets')
+}
+
+/** 同名视为轮换：引用 ID 不变、密文与 key_version 更新，不会报冲突。 */
+export function createSecret(body: SecretCreateInput): Promise<Secret> {
+  return api.post<Secret>('/secrets', body)
+}
+
+export function rotateSecret(secretId: string, body: SecretRotateInput): Promise<Secret> {
+  return api.post<Secret>(`/secrets/${secretId}/rotate`, body)
+}
+
+/** 软停用：引用该凭据的调用会因凭据不可用而失败，记录本身保留。 */
+export function disableSecret(secretId: string): Promise<void> {
+  return api.delete<void>(`/secrets/${secretId}`)
 }
